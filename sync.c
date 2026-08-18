@@ -316,6 +316,23 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode,
   snprintf(boxdir, sizeof boxdir, "%s/%s", root, ch->near);
   imapquote(qfar, sizeof qfar, ch->far);
 
+  /* from scratch: recv bootstraps the maildir tree, then the empty state
+   * below makes everything on the server "new" - a full clone */
+  if (mode == MSync) {
+    if (mdensure(boxdir, err, sizeof err) < 0) {
+      report(label, "error: %s", err);
+      return 2;
+    }
+  } else {
+    char curp[4160];
+    struct stat sb;
+    snprintf(curp, sizeof curp, "%s/cur", boxdir);
+    if (stat(curp, &sb) < 0) {
+      report(label, "no maildir yet (hml recv creates it and clones)");
+      return 1;
+    }
+  }
+
   if ((lfd = lockstate(boxdir)) == -2) {
     report(label, "locked (mbsync running?), skipped");
     return 1;

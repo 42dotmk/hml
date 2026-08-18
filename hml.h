@@ -85,6 +85,7 @@ typedef struct {
 
 int boxscan(const char *boxdir, Box *box, char *err, size_t errlen);
 void boxfree(Box *box);
+int mdensure(const char *boxdir, char *err, size_t errlen); /* mkdir -p + cur/new/tmp */
 int mdtmp(char *dst, size_t cap, const char *boxdir);
 int mdplace(const char *boxdir, uint32_t nuid, unsigned flags,
             const char *tmppath, char *err, size_t errlen);

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -66,6 +67,40 @@ static int scanone(const char *boxdir, const char *sub, int indir, Box *box,
     arrput(box->msgs, m);
   }
   closedir(d);
+  return 0;
+}
+
+/* create the maildir and its cur/new/tmp, parents included; 0700 like
+ * mbsync, existing directories (whatever their mode) are left alone */
+int mdensure(const char *boxdir, char *err, size_t errlen) {
+  char p[4160];
+  size_t i, n = strlen(boxdir);
+  static const char *sub[] = {"cur", "new", "tmp"};
+  int k;
+
+  if (n == 0 || n >= sizeof p - 5) {
+    snprintf(err, errlen, "bad maildir path");
+    return -1;
+  }
+  memcpy(p, boxdir, n + 1);
+  for (i = 1; i <= n; i++) {
+    if (i < n && p[i] != '/')
+      continue;
+    p[i] = '\0';
+    if (mkdir(p, 0700) < 0 && errno != EEXIST) {
+      snprintf(err, errlen, "mkdir %s: %s", p, strerror(errno));
+      return -1;
+    }
+    if (i < n)
+      p[i] = '/';
+  }
+  for (k = 0; k < 3; k++) {
+    snprintf(p, sizeof p, "%s/%s", boxdir, sub[k]);
+    if (mkdir(p, 0700) < 0 && errno != EEXIST) {
+      snprintf(err, errlen, "mkdir %s: %s", p, strerror(errno));
+      return -1;
+    }
+  }
   return 0;
 }
 
