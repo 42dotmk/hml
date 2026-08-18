@@ -121,7 +121,8 @@ static int usage(int rc) {
         "  send     SMTP submission: hml send [-t] [-f from] [-a account]\n"
         "           [rcpt ...] < message\n"
         "  search   not implemented yet\n"
-        "  -d       distrust caches, verify with a full listing\n",
+        "  -d       distrust caches, verify with a full listing\n"
+        "  -v       print version\n",
         stderr);
   return rc;
 }
@@ -158,6 +159,7 @@ int main(int argc, char *argv[]) {
       switch (*p) {
       case 'n': mode = MDry; break;
       case 'd': force = 1; break;
+      case 'v': printf("hml %s\n", HML_VERSION); return 0;
       default:
         return usage(*p == 'h' ? 0 : 2);
       }

@@ -2,6 +2,10 @@
 #ifndef HML_H
 #define HML_H
 
+#ifndef HML_VERSION
+#define HML_VERSION "dev"
+#endif
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
