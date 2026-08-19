@@ -98,12 +98,12 @@ Next: per-folder connection fan-out, COMPRESS=DEFLATE, IDLE daemon mode.
 
 ## Build
 
-- `make` — must stay warning-free under `-std=c99 -pedantic -Wall -Wextra`;
+- `make` — must stay warning-free under `-std=c11 -pedantic -Wall -Wextra`;
   the compiler flags are the linter. `make install` symlinks into
   `~/.local/bin`. No test suite; verify by running `./hml` (read-only, safe).
 - Dependencies: OpenSSL (`-lssl -lcrypto`), pthreads, vendored
-  `vendor/stb_ds.h` (needs `-Dtypeof=__typeof__` under `-std=c99`).
-- Accounts/channels are compiled into `config.c` (suckless-style, no runtime
+  `vendor/stb_ds.h` (needs `-Dtypeof=__typeof__` under `-std=c11`).
+- Accounts/channels are compiled into `config.h` (suckless-style, no runtime
   config); passwords come from `PassCmd`-style shell commands (gpg + pass
   store), never live in the source or binary.
 
@@ -118,7 +118,8 @@ Next: per-folder connection fan-out, COMPRESS=DEFLATE, IDLE daemon mode.
   conversion), tagged commands, FETCH body, APPEND.
 - `state.c` / `maildir.c` — mbsync state + `.uidvalidity` read/write /
   maildir scanning and file operations (place, rename, delete).
-- `config.c` — the account table. `hml.h` — all shared types.
+- `config.h` — the account table, included by `hml.c` (other files see it
+  through the externs in `hml.h`). `hml.h` — all shared types.
 - Style: 2-space indent, K&R braces (the user's formatter enforces this —
   distinct from most sibling projects). Blocking I/O with one thread per
   account (no event loop, no callbacks) is a deliberate design choice: the

@@ -12,6 +12,7 @@
 #include <stb_ds.h>
 
 #include "hml.h"
+#include "config.h"
 
 typedef struct {
   const Account *a;

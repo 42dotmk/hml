@@ -1,4 +1,6 @@
-#include "hml.h"
+/* hml configuration: the account table. Edit, then rebuild with `make`.
+ * Included by hml.c only; other files see accounts/naccounts through the
+ * extern declarations in hml.h. */
 
 #define LEN(a) ((int)(sizeof(a) / sizeof *(a)))
 
