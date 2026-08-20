@@ -120,8 +120,9 @@ Next: per-folder connection fan-out, COMPRESS=DEFLATE, IDLE daemon mode.
   maildir scanning and file operations (place, rename, delete).
 - `config.h` — the account table, included by `hml.c` (other files see it
   through the externs in `hml.h`). `hml.h` — all shared types.
-- Style: 2-space indent, K&R braces (the user's formatter enforces this —
-  distinct from most sibling projects). Blocking I/O with one thread per
+- Style: clang-format via the repo's `.clang-format` (shared across the
+  siblings: 4-space indent, attached braces, 80 columns) — run
+  `clang-format -i` on files you touch. Blocking I/O with one thread per
   account (no event loop, no callbacks) is a deliberate design choice: the
   IMAP conversation must read linearly.
 - Passwords: fetch under the shared mutex (one pinentry at a time), zero the
