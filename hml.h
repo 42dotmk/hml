@@ -43,9 +43,11 @@ typedef struct {
     int nchannels;
 } Account;
 
-/* config.c */
+/* config.h */
 extern const Account accounts[];
 extern const int naccounts;
+extern const char *postrecv; /* shell hook after `hml recv`, "" = none */
+extern const char *postsend; /* shell hook after `hml send`, "" = none */
 
 /* state.c - mbsync's on-disk sync state (.mbsyncstate), kept compatible so
  * mbsync and hml can be used interchangeably on the same store */

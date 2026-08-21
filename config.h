@@ -30,3 +30,8 @@ const Account accounts[] = {
      "~/.mail/chgm", gmail, LEN(gmail)},
 };
 const int naccounts = LEN(accounts);
+
+/* shell commands run once after `hml recv` (all accounts done; not on
+ * status or -n dry runs) and after a successful `hml send`; "" = none */
+const char *postrecv = "notmuch new";
+const char *postsend = "";

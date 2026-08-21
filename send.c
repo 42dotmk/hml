@@ -370,5 +370,7 @@ out:
     arrfree(bccblk);
     free(from);
     free(msg);
+    if (rc == 0 && postsend[0] && system(postsend) != 0)
+        fputs("hml: post-send command failed\n", stderr);
     return rc;
 }

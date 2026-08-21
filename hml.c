@@ -205,5 +205,8 @@ int main(int argc, char *argv[]) {
     clock_gettime(CLOCK_MONOTONIC, &t1);
     printf("%.2fs\n", (double)(t1.tv_sec - t0.tv_sec) +
                           (double)(t1.tv_nsec - t0.tv_nsec) / 1e9);
+    fflush(stdout); /* keep our output ahead of the hook's */
+    if (mode == MSync && postrecv[0] && system(postrecv) != 0)
+        fputs("hml: post-recv command failed\n", stderr);
     return rc;
 }
