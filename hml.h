@@ -148,7 +148,27 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force);
 /* send.c - SMTP submission ("hml send", sendmail-compatible) */
 int sendmain(int argc, char **argv);
 
-/* mime.c - the searchable text of one RFC 822 message */
+/* mime.c - the searchable text of one RFC 822 message, and the header/
+ * MIME primitives show.c builds on */
+typedef struct {
+    const char *name;
+    size_t nlen;
+    const char *val; /* raw: still folded, leading space included */
+    size_t vlen;
+} Hdr;
+
+/* collect the header block of an entity; returns the body offset */
+size_t mimehdrs(const char *s, size_t n, Hdr **out);
+/* first header of that name, unfolded and trimmed, malloc'd; NULL if absent */
+char *mimehget(Hdr *h, const char *name);
+char *mimedecode(const char *v); /* RFC 2047 words -> UTF-8, malloc'd */
+void mimetype(const char *ct, char *out, size_t cap); /* "type/sub" lc */
+char *mimeparam(const char *v, const char *name);    /* ;name= value */
+char *mimecte(const char *cte, const char *s, size_t n); /* stb array */
+void mimeutf8(char **out, const char *cs, const char *in, size_t n);
+void mimehtmltext(char **out, const char *s, size_t n);
+long mimedate(const char *s); /* RFC 5322 date -> epoch, 0 if hopeless */
+
 typedef struct {
     char *mid;     /* Message-ID without brackets; synthesized if absent */
     char *subject; /* decoded to UTF-8 */
@@ -158,6 +178,9 @@ typedef struct {
     char *body;   /* text of every text part, HTML stripped, capped */
     char **refs;  /* stb_ds array: In-Reply-To + References, unique */
     long date;    /* epoch, 0 if unparsable */
+    int hasatt;   /* carries a real attachment: a part with disposition
+                     attachment, or a named non-text part that is not a
+                     Content-ID image referenced from the HTML */
 } Mail;
 
 int mailparse(const char *buf, size_t n, Mail *m);
@@ -186,6 +209,16 @@ void queryfree(Query *c);
 int searchmain(int argc, char **argv);
 int countmain(int argc, char **argv);
 int tagsmain(int argc, char **argv);
+/* box "acct/Sub" + sub + name -> absolute path; 0 if the account is gone */
+int filepath(const char *box, const char *sub, const char *name, char *out,
+             size_t cap);
+void dispname(const char *from, char *out, size_t cap);
+void reldate(long t, char *out, size_t cap);
+
+/* show.c - "hml show" (notmuch text format / raw / --part) and
+ * "hml reply" (a reply template for the newest matching message) */
+int showmain(int argc, char **argv);
+int replymain(int argc, char **argv);
 
 /* hml.c */
 void report(const char *label, const char *fmt, ...);

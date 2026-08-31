@@ -123,12 +123,38 @@ How the index works (index.c, mime.c, query.c):
   wanted semantics when rules change.
 - The index is an hml-only cache under the interop contract: delete
   `.hml.db*` and `hml new` rebuilds it (36s including rules). Never
-  delete `.htags`. `postrecv` still runs `notmuch new`; switch it to
-  `hml new` (or run both) to go live.
+  delete `.htags`. `postrecv` runs `hml new`; notmuch is out of the loop.
 
-Next: `hml show` (raw / json / --part), a hed mail plugin `B` binding
-listing tags via `hml tags`, then per-folder connection fan-out,
-COMPRESS=DEFLATE, IDLE daemon mode.
+Milestone 5 (done): `hml show` and `hml reply` (show.c), the two things
+a reader needs beyond search. `show --format=text` reproduces notmuch's
+framing byte-for-byte in the markers (`\fmessage{ id:… filename:…`,
+`\fheader{`, `\fbody{`, `\fpart{ ID: n, Content-type: …`,
+`\fattachment{ ID: n, Filename: …`), parts numbered pre-order from 1 so
+`--format=raw --part=N` addresses what the text output showed; the one
+deliberate difference is that a closing `\fpart}` always gets its own
+line (notmuch glues it to text lacking a final newline). `--format=raw`
+is the file verbatim, `--format=mbox` an mboxrd-escaped mbox with a
+`From ` separator (git am). `reply` picks the newest match, answers
+from the account whose maildir holds it (display name taken from how
+the original addressed us), Reply-To over From, `--reply-to=all` keeps
+other recipients in Cc minus our own addresses, no header folding (hed
+reads the template line by line). `count --batch` and a `--` option
+terminator complete the notmuch CLI surface hed's mail plugin uses; the
+plugin now runs on hml alone (mail_git_patch too, via `--format=mbox`).
+mime.c exports its header/MIME primitives (`mime*` in hml.h) for
+show.c; the index is untouched.
+
+Flag mirroring (index.c `mirrorflags`): the four tags that are maildir
+flags — `unread` (Seen, inverted), `flagged`, `replied`, `passed` — are
+handled by `hml tag` as file renames via `mdsetflags` (seen mail moves
+new/ → cur/), the `file` row updated to match, then `retag`. They are
+never written to `utag` nor to `.htags`; `applyops` skips them, which
+also makes historical log lines naming them inert on replay, and
+`hml tag` drops any pre-existing overrides of those names so they can't
+shadow the files. `hml recv` then pushes the flag change like any local
+one (notmuch's `maildir.synchronize_flags`, without the option).
+
+Next: per-folder connection fan-out, COMPRESS=DEFLATE, IDLE daemon mode.
 
 ## Gmail quirks (learned the hard way, keep in mind)
 
@@ -157,6 +183,41 @@ COMPRESS=DEFLATE, IDLE daemon mode.
   the planned IDLE daemon (one long-lived connection instead of hundreds
   of logins). Gmail also drops long-lived connections mid-command now and
   then; accountmain reconnects and retries the folder once.
+
+The `attachment` tag: `msg.attach` is set at index time from
+`Mail.hasatt` (mime.c: disposition `attachment`, or a named non-text
+leaf without `Content-ID`; `application/(x-)pkcs7-signature` and
+`pgp-signature` excluded), OR-ed over every file of a message (a
+duplicate delivery may lack the part), and `retag` derives the tag from
+it, so `tag:attachment` and what `hml show` frames as `\fattachment{`
+agree. An index from before the column gets it in `dbopen`'s `migrate`:
+`ALTER TABLE`, a broad mark from the FTS `attach` column (one prefix
+query over every initial character, no file touched), then `refine`
+parses the candidates — everything marked plus every multi-file message,
+since the FTS row came from the first copy indexed — on all cores (~1 s
+wall for 24k files), marking or un-marking to match (Content-ID logos
+and signatures out, duplicate deliveries carrying the part in);
+`meta.attachstrict` records that it ran. Measured against notmuch's
+`attachment` tag on the same store: 18,283 shared, 743 real attachments
+notmuch misses (inline PDFs/TIFs, `encrypted.asc`), 4 it has that hml
+does not. Two bugs this surfaced: the backfill's Cyrillic prefix range
+was outside its loop bound (Macedonian-named attachments were all
+missed until the bound was raised), and `param()` took only the first
+RFC 2231 continuation (`filename*0*=`), truncating long UTF-8 names and
+their extensions — it now joins `name*0*= name*1*= …` and decodes them
+with the charset of the first segment.
+
+## stb_ds arrays and the optimizer (learned the hard way)
+
+An empty stb_ds array is a NULL pointer, and `qsort`/`memcpy` declare
+their pointer arguments nonnull. Passing an empty array to them is UB,
+and at `-O2` GCC uses the "proven non-null" pointer to delete the NULL
+check inside a later `arrlen()`, which then dereferences the header of
+NULL: a segfault that appears only in the release build, only on data
+that yields an empty array (a thread with no tags crashed
+`hml search --output=summary` on the 12th newest thread; `-O0` and the
+sanitizer builds ran clean). Guard every `qsort` on an stb array with
+`if (arrlen(x) > 1)` and every `memcpy` into one with `if (n)`.
 
 ## Build
 
@@ -189,6 +250,9 @@ COMPRESS=DEFLATE, IDLE daemon mode.
 - `index.c` — `hml new`, `hml tag` and the schema: maildir diff,
   parallel parse, threading, derived tags + overrides, the tag log and
   its replay, config.h rules. `dbopen` is shared with query.c.
+- `show.c` — `hml show` / `hml reply`: the messages behind a query,
+  notmuch text framing, raw/mbox output, part extraction, reply
+  templates.
 - `query.c` — `hml search`/`count`/`tags`: the query parser (recursive
   descent, notmuch precedence: not > and > or, implicit and) compiled
   to SQL with bound parameters (`querycompile`/`queryprep`, also used by

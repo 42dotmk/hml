@@ -31,7 +31,8 @@ static const char *schema =
     "CREATE TABLE IF NOT EXISTS dir(path TEXT PRIMARY KEY, mtime INTEGER);"
     "CREATE TABLE IF NOT EXISTS msg(id INTEGER PRIMARY KEY,"
     " mid TEXT NOT NULL UNIQUE, thread INTEGER NOT NULL, date INTEGER NOT NULL,"
-    " subject TEXT NOT NULL, sender TEXT NOT NULL);"
+    " subject TEXT NOT NULL, sender TEXT NOT NULL,"
+    " attach INTEGER NOT NULL DEFAULT 0);"
     "CREATE INDEX IF NOT EXISTS msg_thread ON msg(thread);"
     "CREATE INDEX IF NOT EXISTS msg_date ON msg(date);"
     "CREATE TABLE IF NOT EXISTS file(box TEXT NOT NULL, base TEXT NOT NULL,"
@@ -51,6 +52,225 @@ static const char *schema =
     "CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(subject, sender, rcpt,"
     " attach, body, content='', contentless_delete=1,"
     " tokenize='unicode61 remove_diacritics 2');";
+
+/* one code point as UTF-8, appended */
+static void putcp(char *out, size_t cap, unsigned cp) {
+    size_t n = strlen(out);
+    char u[5] = {0};
+
+    if (cp < 0x80)
+        u[0] = (char)cp;
+    else if (cp < 0x800) {
+        u[0] = (char)(0xC0 | cp >> 6);
+        u[1] = (char)(0x80 | (cp & 0x3F));
+    } else {
+        u[0] = (char)(0xE0 | cp >> 12);
+        u[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        u[2] = (char)(0x80 | (cp & 0x3F));
+    }
+    snprintf(out + n, cap - n, "%s", u);
+}
+
+/* msg.attach arrived after the first indexes were built. Add it and
+ * backfill without re-parsing a single file: the FTS index already holds
+ * the attachment-name tokens, so "every message with an attach token" is
+ * one prefix query over every initial letter/digit the tokenizer can
+ * produce (Latin, digits, Cyrillic, Greek — diacritics are folded). */
+static int readfile(const char *path, char **buf, size_t *len);
+
+/* the refinement: the FTS backfill marks every message with a *named*
+ * part, which includes the Content-ID logos of every newsletter; only a
+ * parse tells a real attachment apart, so the candidates are parsed on all
+ * cores (a few seconds for tens of thousands) and the rest un-marked */
+typedef struct {
+    sqlite3_int64 id;
+    char *path;
+    int keep;
+    int marked; /* msg.attach as it stands */
+} Cand;
+
+static struct {
+    Cand *c;
+    long next;
+    pthread_mutex_t mtx;
+} refine_q = {NULL, 0, PTHREAD_MUTEX_INITIALIZER};
+
+static void *refiner(void *arg) {
+    (void)arg;
+    for (;;) {
+        char *buf;
+        size_t len;
+        long i;
+        Mail m;
+        pthread_mutex_lock(&refine_q.mtx);
+        i = refine_q.next++;
+        pthread_mutex_unlock(&refine_q.mtx);
+        if (i >= arrlen(refine_q.c))
+            return NULL;
+        if (readfile(refine_q.c[i].path, &buf, &len) < 0) {
+            refine_q.c[i].keep = refine_q.c[i].marked; /* gone: no opinion */
+            continue;
+        }
+        mailparse(buf, len, &m);
+        refine_q.c[i].keep = m.hasatt;
+        mailfree(&m);
+        free(buf);
+    }
+}
+
+static void refine(sqlite3 *db) {
+    sqlite3_stmt *st, *unmark, *untag;
+    pthread_t tid[32];
+    char path[4608];
+    long n, i, dropped = 0;
+
+    /* candidates: everything marked, plus every message with more than one
+     * file — the FTS row came from the first copy indexed, and a duplicate
+     * delivery may be the one carrying the attachment */
+    sqlite3_prepare_v2(db,
+                       "SELECT msg.id,file.box,file.sub,file.name,msg.attach"
+                       " FROM msg JOIN file ON file.msg=msg.id WHERE"
+                       " msg.attach=1 OR msg.id IN (SELECT msg FROM file"
+                       " GROUP BY msg HAVING COUNT(*)>1)",
+                       -1, &st, NULL);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        Cand c = {sqlite3_column_int64(st, 0), NULL, 0,
+                  sqlite3_column_int(st, 4)};
+        if (!filepath((const char *)sqlite3_column_text(st, 1),
+                      (const char *)sqlite3_column_text(st, 2),
+                      (const char *)sqlite3_column_text(st, 3), path,
+                      sizeof path))
+            continue;
+        c.path = strdup(path);
+        arrput(refine_q.c, c);
+    }
+    sqlite3_finalize(st);
+    n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1)
+        n = 1;
+    if (n > 32)
+        n = 32;
+    if (n > arrlen(refine_q.c))
+        n = arrlen(refine_q.c);
+    for (i = 0; i < n; i++)
+        pthread_create(&tid[i], NULL, refiner, NULL);
+    for (i = 0; i < n; i++)
+        pthread_join(tid[i], NULL);
+    /* a message is an attachment carrier if ANY of its files is; set the
+     * mark (and the tag row) to match, whichever way it currently stands */
+    {
+        struct {
+            sqlite3_int64 key;
+            int value;
+        } *keep = NULL, *seen = NULL;
+        sqlite3_stmt *mark, *tag;
+        long total = 0, added = 0;
+        for (i = 0; i < arrlen(refine_q.c); i++)
+            if (refine_q.c[i].keep)
+                hmput(keep, refine_q.c[i].id, 1);
+        sqlite3_prepare_v2(db, "UPDATE msg SET attach=0 WHERE id=?", -1,
+                           &unmark, NULL);
+        sqlite3_prepare_v2(db,
+                           "DELETE FROM tag WHERE msg=? AND name='attachment'",
+                           -1, &untag, NULL);
+        sqlite3_prepare_v2(db, "UPDATE msg SET attach=1 WHERE id=?", -1,
+                           &mark, NULL);
+        sqlite3_prepare_v2(db,
+                           "INSERT OR IGNORE INTO tag(msg,name) VALUES"
+                           "(?,'attachment')",
+                           -1, &tag, NULL);
+        for (i = 0; i < arrlen(refine_q.c); i++) {
+            sqlite3_int64 id = refine_q.c[i].id;
+            if (hmgeti(seen, id) < 0) {
+                int want = hmgeti(keep, id) >= 0;
+                hmput(seen, id, 1);
+                total++;
+                if (want && !refine_q.c[i].marked) {
+                    sqlite3_bind_int64(mark, 1, id);
+                    sqlite3_step(mark);
+                    sqlite3_reset(mark);
+                    sqlite3_bind_int64(tag, 1, id);
+                    sqlite3_step(tag);
+                    sqlite3_reset(tag);
+                    added++;
+                } else if (!want && refine_q.c[i].marked) {
+                    sqlite3_bind_int64(unmark, 1, id);
+                    sqlite3_step(unmark);
+                    sqlite3_reset(unmark);
+                    sqlite3_bind_int64(untag, 1, id);
+                    sqlite3_step(untag);
+                    sqlite3_reset(untag);
+                    dropped++;
+                }
+            }
+            free(refine_q.c[i].path);
+        }
+        sqlite3_finalize(unmark);
+        sqlite3_finalize(untag);
+        sqlite3_finalize(mark);
+        sqlite3_finalize(tag);
+        fprintf(stderr, "hml: attachment tag: %ld candidates parsed, %ld"
+                        " marked, %ld un-marked\n",
+                total, added, dropped);
+        hmfree(keep);
+        hmfree(seen);
+    }
+    arrfree(refine_q.c);
+}
+
+static void migrate(sqlite3 *db) {
+    sqlite3_stmt *st;
+    char q[4096] = "UPDATE msg SET attach=1 WHERE id IN (SELECT rowid FROM fts"
+                   " WHERE fts MATCH 'attach : (";
+    unsigned cp;
+    int have = 0, strict = 0, first = 1;
+
+    if (sqlite3_prepare_v2(db,
+                           "SELECT 1 FROM pragma_table_info('msg')"
+                           " WHERE name='attach'",
+                           -1, &st, NULL) == SQLITE_OK) {
+        have = sqlite3_step(st) == SQLITE_ROW;
+        sqlite3_finalize(st);
+    }
+    if (have && sqlite3_prepare_v2(db,
+                                   "SELECT 1 FROM meta WHERE key='attachstrict'",
+                                   -1, &st, NULL) == SQLITE_OK) {
+        strict = sqlite3_step(st) == SQLITE_ROW;
+        sqlite3_finalize(st);
+    }
+    if (have && strict)
+        return;
+    for (cp = 0; cp < 0x460; cp++) {
+        if (!((cp >= 'a' && cp <= 'z') || (cp >= '0' && cp <= '9') ||
+              (cp >= 0x430 && cp <= 0x45F) || (cp >= 0x3B1 && cp <= 0x3C9)))
+            continue;
+        if (strlen(q) + 16 >= sizeof q)
+            break;
+        strcat(q, first ? "" : " OR ");
+        putcp(q, sizeof q, cp);
+        strcat(q, "*");
+        first = 0;
+    }
+    strcat(q, ")')");
+    sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+    if ((have || sqlite3_exec(db,
+                              "ALTER TABLE msg ADD COLUMN attach INTEGER NOT"
+                              " NULL DEFAULT 0",
+                              NULL, NULL, NULL) == SQLITE_OK) &&
+        sqlite3_exec(db, q, NULL, NULL, NULL) == SQLITE_OK)
+        sqlite3_exec(db,
+                     "INSERT OR IGNORE INTO tag(msg,name) SELECT id,"
+                     "'attachment' FROM msg WHERE attach=1",
+                     NULL, NULL, NULL);
+    else
+        fputs("hml: attachment backfill failed — rebuild the index "
+              "(delete .hml.db*, run hml new)\n",
+              stderr);
+    refine(db);
+    sqlite3_exec(db, "INSERT OR REPLACE INTO meta(key,val) VALUES"
+                     "('attachstrict',1); COMMIT",
+                 NULL, NULL, NULL);
+}
 
 sqlite3 *dbopen(char *err, size_t errlen) {
     char path[4096], *e = NULL;
@@ -72,6 +292,7 @@ sqlite3 *dbopen(char *err, size_t errlen) {
         sqlite3_close(db);
         return NULL;
     }
+    migrate(db);
     return db;
 }
 
@@ -82,7 +303,8 @@ typedef struct {
     sqlite3_stmt *msgbymid, *insmsg, *setthread, *merge, *insfts, *delfts,
         *insref, *delref, *insfile, *mvfile, *delfile, *filemsg, *nfiles,
         *delmsg, *deltag, *instag, *msgfiles, *boxfiles, *dirget, *dirset,
-        *midof, *utagget, *utagset, *metaget, *metaset, *insnew;
+        *midof, *utagget, *utagset, *utagdel, *filesof, *attachof, *setattach,
+        *metaget, *metaset, *insnew;
     long added, moved, removed, newmsgs;
 } Db;
 
@@ -103,8 +325,10 @@ static sqlite3_stmt *prep(Db *d, const char *sql) {
 
 static void prepall(Db *d) {
     d->msgbymid = prep(d, "SELECT id FROM msg WHERE mid=?");
-    d->insmsg = prep(d, "INSERT INTO msg(mid,thread,date,subject,sender)"
-                        " VALUES(?,?,?,?,?)");
+    d->insmsg = prep(d, "INSERT INTO msg(mid,thread,date,subject,sender,"
+                        "attach) VALUES(?,?,?,?,?,?)");
+    d->attachof = prep(d, "SELECT attach FROM msg WHERE id=?");
+    d->setattach = prep(d, "UPDATE msg SET attach=1 WHERE id=? AND attach=0");
     d->setthread = prep(d, "UPDATE msg SET thread=? WHERE id=?");
     d->merge = prep(d, "UPDATE msg SET thread=? WHERE thread=?");
     d->insfts = prep(d, "INSERT INTO fts(rowid,subject,sender,rcpt,attach,"
@@ -131,6 +355,8 @@ static void prepall(Db *d) {
     d->utagget = prep(d, "SELECT name,val FROM utag WHERE mid=?");
     d->utagset =
         prep(d, "INSERT OR REPLACE INTO utag(mid,name,val) VALUES(?,?,?)");
+    d->utagdel = prep(d, "DELETE FROM utag WHERE mid=? AND name=?");
+    d->filesof = prep(d, "SELECT box,base,sub,name,flags FROM file WHERE msg=?");
     d->metaget = prep(d, "SELECT val FROM meta WHERE key=?");
     d->metaset = prep(d, "INSERT OR REPLACE INTO meta(key,val) VALUES(?,?)");
     d->insnew = prep(d, "INSERT OR IGNORE INTO newmsg(id) VALUES(?)");
@@ -206,6 +432,10 @@ static void retag(Db *d, sqlite3_int64 id) {
         tags[nt++] = strdup("draft");
     if (strchr(flags, 'P'))
         tags[nt++] = strdup("passed");
+    sqlite3_bind_int64(d->attachof, 1, id);
+    if (step1(d, d->attachof) > 0)
+        tags[nt++] = strdup("attachment");
+    sqlite3_reset(d->attachof);
     /* overrides: +tag adds, -tag removes, latest write per name wins */
     sqlite3_bind_int64(d->midof, 1, id);
     if (sqlite3_step(d->midof) == SQLITE_ROW)
@@ -279,12 +509,130 @@ static void freeops(Op *ops) {
     arrfree(ops);
 }
 
-/* record the overrides for one message and refresh its tags if indexed */
+/* the tags that ARE maildir flags: unread (Seen, inverted), flagged,
+ * replied, passed. They are never overrides — `hml tag` renames the
+ * files instead, so the tag, the flag and (after `hml recv`) the server
+ * all agree. Returns the flag bit, 0 for an ordinary tag. */
+static unsigned flagof(const char *name, int *inverted) {
+    *inverted = 0;
+    if (!strcmp(name, "unread")) {
+        *inverted = 1;
+        return FSeen;
+    }
+    if (!strcmp(name, "flagged"))
+        return FFlagged;
+    if (!strcmp(name, "replied"))
+        return FAnswered;
+    if (!strcmp(name, "passed"))
+        return FPassed;
+    return 0;
+}
+
+/* the maildir directory of a box "acct/Sub"; 0 if the account is gone */
+static int boxdirof(const char *box, char *out, size_t cap) {
+    const char *slash = strchr(box, '/');
+    char root[4096];
+    int a;
+
+    for (a = 0; a < naccounts; a++)
+        if (slash && (size_t)(slash - box) == strlen(accounts[a].name) &&
+            !strncmp(box, accounts[a].name, (size_t)(slash - box)))
+            break;
+    if (a == naccounts)
+        return 0;
+    expand(accounts[a].maildir, root, sizeof root);
+    snprintf(out, cap, "%s/%s", root, slash + 1);
+    return 1;
+}
+
+/* apply the flag ops to every file of a message: rename in the maildir
+ * (seen mail graduates new/ -> cur/), mirror the row, drop any stale
+ * override of the same name, then recompute the tags */
+static void mirrorflags(Db *d, sqlite3_int64 id, const char *mid,
+                        const Op *ops) {
+    typedef struct {
+        char *box, *base, *sub, *name, *flags;
+    } Row;
+    Row *rows = NULL, r;
+    ptrdiff_t i, k;
+    int rc, inv;
+
+    sqlite3_bind_int64(d->filesof, 1, id);
+    while ((rc = sqlite3_step(d->filesof)) == SQLITE_ROW) {
+        r.box = strdup((const char *)sqlite3_column_text(d->filesof, 0));
+        r.base = strdup((const char *)sqlite3_column_text(d->filesof, 1));
+        r.sub = strdup((const char *)sqlite3_column_text(d->filesof, 2));
+        r.name = strdup((const char *)sqlite3_column_text(d->filesof, 3));
+        r.flags = strdup((const char *)sqlite3_column_text(d->filesof, 4));
+        arrput(rows, r);
+    }
+    if (rc != SQLITE_DONE)
+        die(d, "filesof");
+    sqlite3_reset(d->filesof);
+    for (i = 0; i < arrlen(rows); i++) {
+        unsigned f = letterflags(rows[i].flags), nf = f, bit;
+        char boxdir[4160], name[512], fl[8], err[256];
+        Local m;
+        for (k = 0; k < arrlen(ops); k++) {
+            if (!(bit = flagof(ops[k].name, &inv)))
+                continue;
+            if (ops[k].on != inv)
+                nf |= bit;
+            else
+                nf &= ~bit;
+        }
+        if (nf == f || !boxdirof(rows[i].box, boxdir, sizeof boxdir))
+            continue;
+        m.uid = 0;
+        m.flags = f;
+        m.name = rows[i].name;
+        m.indir = !strcmp(rows[i].sub, "new");
+        if (mdsetflags(boxdir, &m, nf, err, sizeof err) < 0) {
+            fprintf(stderr, "hml %s: %s/%s: %s\n", cmdname, rows[i].box,
+                    rows[i].name, err);
+            continue;
+        }
+        /* the row follows the rename: the same name mdsetflags built */
+        flagletters(nf, fl);
+        snprintf(name, sizeof name, "%.*s:2,%s",
+                 (int)(strstr(rows[i].name, ":2,")
+                           ? strstr(rows[i].name, ":2,") - rows[i].name
+                           : (long)strlen(rows[i].name)),
+                 rows[i].name, fl);
+        bindtext(d->mvfile, 1, (nf & FSeen) ? "cur" : rows[i].sub);
+        bindtext(d->mvfile, 2, name);
+        bindtext(d->mvfile, 3, fl);
+        bindtext(d->mvfile, 4, rows[i].box);
+        bindtext(d->mvfile, 5, rows[i].base);
+        step1(d, d->mvfile);
+    }
+    for (k = 0; k < arrlen(ops); k++) { /* a flag is never an override */
+        bindtext(d->utagdel, 1, mid);
+        bindtext(d->utagdel, 2, ops[k].name);
+        step1(d, d->utagdel);
+    }
+    for (i = 0; i < arrlen(rows); i++) {
+        free(rows[i].box);
+        free(rows[i].base);
+        free(rows[i].sub);
+        free(rows[i].name);
+        free(rows[i].flags);
+    }
+    arrfree(rows);
+    retag(d, id);
+}
+
+/* record the overrides for one message and refresh its tags if indexed;
+ * flag tags are skipped here (they are files, not overrides — see
+ * mirrorflags), which also makes old log lines naming them inert */
 static void applyops(Db *d, const char *mid, const Op *ops) {
     ptrdiff_t i;
     sqlite3_int64 id;
+    int inv;
 
     for (i = 0; i < arrlen(ops); i++) {
+        if (flagof(ops[i].name, &inv))
+            continue;
         bindtext(d->utagset, 1, mid);
         bindtext(d->utagset, 2, ops[i].name);
         sqlite3_bind_int(d->utagset, 3, ops[i].on);
@@ -514,6 +862,7 @@ static void addfile(Db *d, const Job *j, const Mail *m) {
         sqlite3_bind_int64(d->insmsg, 3, m->date);
         bindtext(d->insmsg, 4, m->subject);
         bindtext(d->insmsg, 5, m->from);
+        sqlite3_bind_int(d->insmsg, 6, m->hasatt);
         step1(d, d->insmsg);
         id = sqlite3_last_insert_rowid(d->db);
         if (!thread) {
@@ -536,6 +885,11 @@ static void addfile(Db *d, const Job *j, const Mail *m) {
         sqlite3_bind_int64(d->insnew, 1, id);
         step1(d, d->insnew);
         d->newmsgs++;
+    } else if (m->hasatt) {
+        /* another file of a known message: it may carry the attachment
+         * the first delivery lacked (duplicate list deliveries do) */
+        sqlite3_bind_int64(d->setattach, 1, id);
+        step1(d, d->setattach);
     }
     snprintf(base, sizeof base, "%.*s", (int)baselen(j->name), j->name);
     bindtext(d->insfile, 1, j->box);
@@ -872,7 +1226,7 @@ int tagmain(int argc, char **argv) {
     Db d;
     Query q;
     sqlite3_stmt *st;
-    Op *ops = NULL;
+    Op *ops = NULL, *flagops = NULL, *tagops = NULL;
     char *spec = NULL, *query = NULL, *log = NULL, *err = NULL, dberr[256];
     long size;
     int i, rc;
@@ -919,18 +1273,36 @@ int tagmain(int argc, char **argv) {
         fprintf(stderr, "hml tag: %s\n", dberr);
         return 2;
     }
+    /* flag tags act on the files, the rest are logged overrides */
+    for (i = 0; i < arrlen(ops); i++) {
+        int inv;
+        if (flagof(ops[i].name, &inv))
+            arrput(flagops, ops[i]);
+        else
+            arrput(tagops, ops[i]);
+    }
     prepall(&d);
     exec(&d, "BEGIN IMMEDIATE");
-    if (!(st = queryprep(d.db, "SELECT mid FROM msg WHERE %s", &q, "", &err))) {
+    /* overrides of flag names from before flags were mirrored are inert
+     * now; drop them so they can never shadow the real maildir state */
+    exec(&d, "DELETE FROM utag WHERE name IN "
+             "('unread','flagged','replied','passed')");
+    if (!(st = queryprep(d.db, "SELECT id,mid FROM msg WHERE %s", &q, "",
+                         &err))) {
         fprintf(stderr, "hml tag: %s\n", err);
         return 2;
     }
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-        const char *mid = (const char *)sqlite3_column_text(st, 0);
+        sqlite3_int64 id = sqlite3_column_int64(st, 0);
+        const char *mid = (const char *)sqlite3_column_text(st, 1);
         if (strpbrk(mid, "\t\n"))
             continue; /* cannot be logged faithfully; never seen */
-        logline(&log, mid, ops);
-        applyops(&d, mid, ops);
+        if (arrlen(flagops))
+            mirrorflags(&d, id, mid, flagops);
+        if (arrlen(tagops)) {
+            logline(&log, mid, tagops);
+            applyops(&d, mid, tagops);
+        }
     }
     if (rc != SQLITE_DONE)
         die(&d, "tag");
@@ -948,6 +1320,8 @@ int tagmain(int argc, char **argv) {
     sqlite3_close_v2(d.db);
     arrfree(log);
     queryfree(&q);
+    arrfree(flagops); /* the names belong to ops */
+    arrfree(tagops);
     freeops(ops);
     arrfree(spec);
     arrfree(query);

@@ -16,15 +16,9 @@
 enum { BodyMax = 512 * 1024, DepthMax = 16 };
 
 typedef struct {
-    const char *name;
-    size_t nlen;
-    const char *val; /* raw: still folded, leading space included */
-    size_t vlen;
-} Hdr;
-
-typedef struct {
     char *body, *attach; /* stb_ds char arrays */
     int depth;
+    int hasatt; /* see Mail.hasatt */
 } Ctx;
 
 static void putn(char **b, const char *s, size_t n) {
@@ -312,30 +306,24 @@ static void mediatype(const char *v, char *out, size_t cap) {
     out[i] = '\0';
 }
 
-/* value of a ;name= parameter, unquoted, RFC 2231 name*= decoded to
- * UTF-8, malloc'd; NULL if absent */
-static char *param(const char *v, const char *name) {
-    size_t k = strlen(name);
+/* find ";key=" or ";key*=" among the parameters of v (case-insensitive);
+ * the value span (quotes stripped) and whether it was the extended form */
+static int pfind(const char *v, const char *key, const char **val, size_t *len,
+                 int *ext) {
+    size_t k = strlen(key);
     const char *p = v, *e;
-    char *out = NULL, *raw = NULL;
-    int ext;
 
     while ((p = strchr(p, ';'))) {
         p++;
         while (*p == ' ' || *p == '\t')
             p++;
-        if (strncasecmp(p, name, k))
+        if (strncasecmp(p, key, k))
             continue;
         p += k;
-        ext = 0;
-        if (*p == '*') { /* name*= or name*0= (first continuation only) */
+        *ext = 0;
+        if (*p == '*') {
             p++;
-            if (*p == '0')
-                p++;
-            if (*p == '*') {
-                p++;
-                ext = 1;
-            }
+            *ext = 1;
         }
         if (*p != '=')
             continue;
@@ -349,31 +337,74 @@ static char *param(const char *v, const char *name) {
             while (*e && *e != ';' && *e != ' ' && *e != '\t')
                 e++;
         }
-        putn(&raw, p, (size_t)(e - p));
-        arrput(raw, '\0');
-        if (ext) { /* charset'lang'percent-encoded */
-            char *cs = raw, *q = strchr(raw, '\''), *r, *t = NULL;
-            if (q && (r = strchr(q + 1, '\''))) {
-                *q = '\0';
-                for (r++; *r; r++) {
-                    int a, b;
-                    if (*r == '%' && (a = hexval(r[1])) >= 0 &&
-                        (b = hexval(r[2])) >= 0) {
-                        arrput(t, (char)(a << 4 | b));
-                        r += 2;
-                    } else
-                        arrput(t, *r);
-                }
-                toutf8(&out, cs, t, arrlenu(t));
-                arrfree(t);
-            } else
-                putstr(&out, raw);
-        } else
-            putstr(&out, raw);
-        arrfree(raw);
-        return fin(&out);
+        *val = p;
+        *len = (size_t)(e - p);
+        return 1;
     }
-    return NULL;
+    return 0;
+}
+
+/* charset'lang'percent-encoded (RFC 2231): the charset, malloc'd, and the
+ * percent-decoded bytes appended to raw */
+static char *pdecode(char **raw, const char *p, size_t n, int first) {
+    char *cs = NULL;
+    const char *q, *r, *end = p + n;
+
+    if (first && (q = memchr(p, '\'', n)) && (r = memchr(q + 1, '\'', (size_t)(end - q - 1)))) {
+        cs = malloc((size_t)(q - p) + 1);
+        memcpy(cs, p, (size_t)(q - p));
+        cs[q - p] = '\0';
+        p = r + 1;
+    }
+    for (; p < end; p++) {
+        int a, b;
+        if (*p == '%' && p + 2 < end && (a = hexval(p[1])) >= 0 &&
+            (b = hexval(p[2])) >= 0) {
+            arrput(*raw, (char)(a << 4 | b));
+            p += 2;
+        } else
+            arrput(*raw, *p);
+    }
+    return cs;
+}
+
+/* value of a ;name= parameter, unquoted, malloc'd; RFC 2231 name*=
+ * decoded to UTF-8 and name*0*= name*1*= ... continuations joined;
+ * NULL if absent */
+static char *param(const char *v, const char *name) {
+    char key[96], *out = NULL, *raw = NULL, *cs = NULL, *c2;
+    const char *val;
+    size_t n;
+    int ext, k;
+
+    for (k = 0;; k++) { /* continuations */
+        snprintf(key, sizeof key, "%s*%d", name, k);
+        if (!pfind(v, key, &val, &n, &ext))
+            break;
+        if (ext) {
+            c2 = pdecode(&raw, val, n, k == 0);
+            if (c2 && !cs)
+                cs = c2;
+            else
+                free(c2);
+        } else
+            putn(&raw, val, n);
+    }
+    if (!k) { /* the single-value forms */
+        if (!pfind(v, name, &val, &n, &ext))
+            return NULL;
+        if (ext)
+            cs = pdecode(&raw, val, n, 1);
+        else
+            putn(&raw, val, n);
+    }
+    if (cs) {
+        toutf8(&out, cs, raw, arrlenu(raw));
+        free(cs);
+    } else
+        putn(&out, raw, arrlenu(raw));
+    arrfree(raw);
+    return fin(&out);
 }
 
 /* --- dates ------------------------------------------------------------- */
@@ -616,6 +647,20 @@ static void walk(Ctx *c, const char *s, size_t n) {
         fn = param(cd, "filename");
     if (!fn && ct)
         fn = param(ct, "name");
+    {
+        /* a signature part (smime.p7s, signature.asc) travels as an
+         * attachment but is not one to a reader */
+        char *cid = hget(h, "Content-ID");
+        int sig = !strcmp(type, "application/pkcs7-signature") ||
+                  !strcmp(type, "application/x-pkcs7-signature") ||
+                  !strcmp(type, "application/pgp-signature");
+        if (!sig && ((cd && !strncasecmp(cd, "attachment", 10)) ||
+                     (fn && !cid && strncmp(type, "multipart/", 10) &&
+                      strcmp(type, "message/rfc822") &&
+                      strncmp(type, "text/", 5))))
+            c->hasatt = 1;
+        free(cid);
+    }
     if (fn) {
         char *d = hdrdecode(fn);
         putstr(&c->attach, d);
@@ -700,7 +745,7 @@ static char *hdrtext(Hdr *h, const char *name) {
 
 int mailparse(const char *buf, size_t n, Mail *m) {
     Hdr *h = NULL;
-    Ctx c = {NULL, NULL, 0};
+    Ctx c = {NULL, NULL, 0, 0};
     char *v, *cc, *id;
     const char *p;
     size_t i;
@@ -754,6 +799,7 @@ int mailparse(const char *buf, size_t n, Mail *m) {
     walk(&c, buf, n);
     m->attach = fin(&c.attach);
     m->body = fin(&c.body);
+    m->hasatt = c.hasatt;
     utf8fix(m->attach);
     utf8fix(m->body);
     return 0;
@@ -773,3 +819,19 @@ void mailfree(Mail *m) {
     arrfree(m->refs);
     memset(m, 0, sizeof *m);
 }
+
+/* --- exported primitives (show.c) --------------------------------------- */
+
+size_t mimehdrs(const char *s, size_t n, Hdr **out) { return headers(s, n, out); }
+char *mimehget(Hdr *h, const char *name) { return hget(h, name); }
+char *mimedecode(const char *v) { return hdrdecode(v); }
+void mimetype(const char *ct, char *out, size_t cap) { mediatype(ct, out, cap); }
+char *mimeparam(const char *v, const char *name) { return param(v, name); }
+char *mimecte(const char *cte, const char *s, size_t n) {
+    return ctedecode(cte, s, n);
+}
+void mimeutf8(char **out, const char *cs, const char *in, size_t n) {
+    toutf8(out, cs, in, n);
+}
+void mimehtmltext(char **out, const char *s, size_t n) { htmltext(out, s, n); }
+long mimedate(const char *s) { return parsedate(s); }

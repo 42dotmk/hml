@@ -134,9 +134,15 @@ static int usage(int rc) {
           "  search   query the index: hml search [--output=summary|threads|\n"
           "           messages|files|tags] [--format=text|json] [--limit=N]\n"
           "           [--sort=newest-first|oldest-first] <query>\n"
-          "  count    hml count [--output=messages|threads|files] <query>\n"
+          "  count    hml count [--batch] [--output=messages|threads|files]\n"
+          "           <query>; --batch: one query per stdin line\n"
           "  tags     hml tags [<query>]: every tag, or those of the matches\n"
           "  tag      hml tag +tag|-tag ... [--] <query>: add/remove tags\n"
+          "  show     hml show [--format=text|raw|mbox] [--part=N]\n"
+          "           [--include-html] [--] <query>: messages in notmuch's\n"
+          "           text format, raw bytes, or an mbox\n"
+          "  reply    hml reply [--reply-to=sender|all] [--] <query>: a reply\n"
+          "           template for the newest matching message\n"
           "  -d       distrust caches, verify with a full listing\n"
           "  -v       print version\n",
           stderr);
@@ -167,6 +173,10 @@ int main(int argc, char *argv[]) {
             return tagsmain(argc - 2, argv + 2);
         } else if (!strcmp(argv[1], "tag")) {
             return tagmain(argc - 2, argv + 2);
+        } else if (!strcmp(argv[1], "show")) {
+            return showmain(argc - 2, argv + 2);
+        } else if (!strcmp(argv[1], "reply")) {
+            return replymain(argc - 2, argv + 2);
         } else {
             /* not a command: an account name filters the status report */
             for (k = 0; k < naccounts; k++)

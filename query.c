@@ -29,7 +29,10 @@ typedef struct {
 } Parser;
 
 static void sadd(char **b, const char *t) {
-    memcpy(arraddnptr(*b, strlen(t)), t, strlen(t));
+    size_t n = strlen(t);
+
+    if (n) /* memcpy(NULL, …, 0) is UB the optimizer builds on */
+        memcpy(arraddnptr(*b, n), t, n);
 }
 
 static void seterr(char **err, const char *fmt, const char *arg) {
@@ -325,10 +328,26 @@ static void bindparam(Query *c, char *v) { /* takes ownership of v */
     sadd(&c->sql, "?");
 }
 
+/* an exact-match value may be written quoted (tag:"to do", notmuch's
+ * habit for names with spaces): the quotes are not part of the value */
+static char *unquote(char *v) {
+    size_t k = strlen(v);
+
+    if (k >= 2 && v[0] == '"' && v[k - 1] == '"') {
+        memmove(v, v + 1, k - 2);
+        v[k - 2] = '\0';
+    }
+    return v;
+}
+
 static void compterm(Query *c, const Node *n) {
     const char *p = n->prefix, *v = n->val;
     char buf[64];
     long a, b;
+
+    if (p && (!strcmp(p, "tag") || !strcmp(p, "id") || !strcmp(p, "thread") ||
+              !strcmp(p, "path") || !strcmp(p, "folder")))
+        v = unquote(n->val);
 
     if (!p && !strcmp(v, "*")) {
         sadd(&c->sql, "1");
@@ -487,7 +506,7 @@ static void jsonstr(const char *s) {
 }
 
 /* the display name of a From header, or its address */
-static void dispname(const char *from, char *out, size_t cap) {
+void dispname(const char *from, char *out, size_t cap) {
     const char *lt = strchr(from, '<'), *s = from, *e;
     size_t n;
 
@@ -515,7 +534,7 @@ static void dispname(const char *from, char *out, size_t cap) {
 
 /* notmuch's relative dates: "Today 10:12", "Yest. 21:12", "Mon. 10:12",
  * "August 21", "2025-08-21" */
-static void reldate(long t, char *out, size_t cap) {
+void reldate(long t, char *out, size_t cap) {
     time_t now = time(NULL), tt = t;
     struct tm tm, tn;
     char day[16];
@@ -553,6 +572,7 @@ typedef struct {
     const char *output, *format;
     long limit, offset;
     int oldest;
+    int batch; /* count: one query per stdin line */
 } Opts;
 
 static int cmpnewest(const void *a, const void *b) {
@@ -652,8 +672,11 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
         seterr(err, "%s", sqlite3_errmsg(db));
         return -1;
     }
-    qsort(ts, (size_t)arrlen(ts), sizeof *ts,
-          o->oldest ? cmpoldest : cmpnewest);
+    /* never qsort an empty stb array: its NULL base is a nonnull argument
+     * and GCC then deletes arrlen's own NULL check downstream (-O2) */
+    if (arrlen(ts) > 1)
+        qsort(ts, (size_t)arrlen(ts), sizeof *ts,
+              o->oldest ? cmpoldest : cmpnewest);
     n = arrlen(ts);
     if (o->offset < n)
         n -= o->offset;
@@ -683,7 +706,8 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
                                                 : t->matched;
         sqlite3_reset(total);
         threadtags(db, t, &tags);
-        qsort(tags, (size_t)arrlen(tags), sizeof *tags, cmpstr);
+        if (arrlen(tags) > 1)
+            qsort(tags, (size_t)arrlen(tags), sizeof *tags, cmpstr);
         reldate(o->oldest ? t->oldest : t->newest, date, sizeof date);
         if (json) {
             printf(i ? ",\n{" : "\n{");
@@ -727,6 +751,25 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     return 0;
 }
 
+/* the absolute path of a maildir file the index knows as (box, sub, name);
+ * 0 when the box belongs to an account that is no longer configured */
+int filepath(const char *box, const char *sub, const char *name, char *out,
+             size_t cap) {
+    const char *slash = strchr(box, '/');
+    char root[4096];
+    int a;
+
+    for (a = 0; a < naccounts; a++)
+        if (slash && (size_t)(slash - box) == strlen(accounts[a].name) &&
+            !strncmp(box, accounts[a].name, (size_t)(slash - box)))
+            break;
+    if (a == naccounts)
+        return 0;
+    expand(accounts[a].maildir, root, sizeof root);
+    snprintf(out, cap, "%s/%s/%s/%s", root, slash + 1, sub, name);
+    return 1;
+}
+
 /* messages / files / tags: one string per line, or a JSON array */
 static int listing(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     sqlite3_stmt *st;
@@ -760,19 +803,10 @@ static int listing(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         const char *s = (const char *)sqlite3_column_text(st, 0);
         if (files) {
-            const char *box = s, *slash = strchr(box, '/');
-            char root[4096];
-            int a;
-            for (a = 0; a < naccounts; a++)
-                if (slash &&
-                    (size_t)(slash - box) == strlen(accounts[a].name) &&
-                    !strncmp(box, accounts[a].name, (size_t)(slash - box)))
-                    break;
-            if (a == naccounts)
+            if (!filepath(s, (const char *)sqlite3_column_text(st, 1),
+                          (const char *)sqlite3_column_text(st, 2), line,
+                          sizeof line))
                 continue; /* box of an account no longer configured */
-            expand(accounts[a].maildir, root, sizeof root);
-            snprintf(line, sizeof line, "%s/%s/%s/%s", root, slash + 1,
-                     sqlite3_column_text(st, 1), sqlite3_column_text(st, 2));
             s = line;
         } else if (!strcmp(o->output, "messages") && !json) {
             snprintf(line, sizeof line, "id:%s", s);
@@ -802,7 +836,17 @@ static char *getopts(int argc, char **argv, Opts *o, const char *cmd) {
 
     for (i = 0; i < argc; i++) {
         const char *a = argv[i];
-        if (!strncmp(a, "--output=", 9))
+        if (!strcmp(a, "--")) { /* end of options: the rest is the query */
+            for (i++; i < argc; i++) {
+                if (q)
+                    sadd(&q, " ");
+                sadd(&q, argv[i]);
+            }
+            break;
+        }
+        if (!strcmp(a, "--batch"))
+            o->batch = 1;
+        else if (!strncmp(a, "--output=", 9))
             o->output = a + 9;
         else if (!strncmp(a, "--format=", 9))
             o->format = a + 9;
@@ -835,7 +879,7 @@ static int fail(const char *cmd, char *err) {
 }
 
 int searchmain(int argc, char **argv) {
-    Opts o = {"summary", "text", -1, 0, 0};
+    Opts o = {"summary", "text", -1, 0, 0, 0};
     Query c;
     sqlite3 *db;
     char *q, *err = NULL, dberr[256];
@@ -869,13 +913,32 @@ int searchmain(int argc, char **argv) {
     return rc < 0 ? fail("search", err) : 0;
 }
 
-int countmain(int argc, char **argv) {
-    Opts o = {"messages", "text", -1, 0, 0};
+/* one count for query q on stdout; -1 with err set on failure */
+static int count1(sqlite3 *db, const char *sql, const char *q, char **err) {
     Query c;
-    sqlite3 *db;
     sqlite3_stmt *st;
+
+    if (querycompile(q, &c, err) < 0)
+        return -1;
+    if (!(st = queryprep(db, sql, &c, "", err)) ||
+        sqlite3_step(st) != SQLITE_ROW) {
+        seterr(err, "%s", sqlite3_errmsg(db));
+        queryfree(&c);
+        return -1;
+    }
+    printf("%lld\n", (long long)sqlite3_column_int64(st, 0));
+    sqlite3_finalize(st);
+    queryfree(&c);
+    return 0;
+}
+
+/* hml count [--batch] [--output=...] <query>; with --batch every stdin
+ * line is a query and gets its own count line (notmuch's --batch) */
+int countmain(int argc, char **argv) {
+    Opts o = {"messages", "text", -1, 0, 0, 0};
+    sqlite3 *db;
     const char *sql;
-    char *q, *err = NULL, dberr[256];
+    char *q, *err = NULL, dberr[256], line[8192];
 
     if (!(q = getopts(argc, argv, &o, "count")))
         return 2;
@@ -885,11 +948,6 @@ int countmain(int argc, char **argv) {
         sadd(&q, "*");
         arrput(q, '\0');
     }
-    if (querycompile(q, &c, &err) < 0) {
-        arrfree(q);
-        return fail("count", err);
-    }
-    arrfree(q);
     if (!strcmp(o.output, "threads"))
         sql = "SELECT COUNT(DISTINCT thread) FROM msg WHERE %s";
     else if (!strcmp(o.output, "files"))
@@ -898,26 +956,33 @@ int countmain(int argc, char **argv) {
     else
         sql = "SELECT COUNT(*) FROM msg WHERE %s";
     if (!(db = dbopen(dberr, sizeof dberr))) {
-        queryfree(&c);
+        arrfree(q);
         return fail("count", strdup(dberr));
     }
-    if (!(st = queryprep(db, sql, &c, "", &err)) ||
-        sqlite3_step(st) != SQLITE_ROW) {
-        seterr(&err, "%s", sqlite3_errmsg(db));
-        queryfree(&c);
+    if (o.batch) {
+        while (fgets(line, sizeof line, stdin)) {
+            size_t n = strlen(line);
+            while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
+                line[--n] = '\0';
+            if (count1(db, sql, n ? line : "*", &err) < 0) {
+                arrfree(q);
+                sqlite3_close(db);
+                return fail("count", err);
+            }
+        }
+    } else if (count1(db, sql, q, &err) < 0) {
+        arrfree(q);
         sqlite3_close(db);
         return fail("count", err);
     }
-    printf("%lld\n", (long long)sqlite3_column_int64(st, 0));
-    sqlite3_finalize(st);
-    queryfree(&c);
+    arrfree(q);
     sqlite3_close(db);
     return 0;
 }
 
 /* every tag in the index, or those of the messages matching a query */
 int tagsmain(int argc, char **argv) {
-    Opts o = {"tags", "text", -1, 0, 0};
+    Opts o = {"tags", "text", -1, 0, 0, 0};
     Query c;
     sqlite3 *db;
     char *q, *err = NULL, dberr[256];

@@ -12,7 +12,7 @@ CFLAGS  = -std=c11 -pedantic -Wall -Wextra -O2 -D_POSIX_C_SOURCE=200809L \
 LDLIBS  = -lssl -lcrypto -lsqlite3
 BINDIR  = $(HOME)/.local/bin
 OBJ     = hml.o sync.o send.o imap.o state.o maildir.o mime.o index.o \
-          query.o
+          query.o show.o
 
 all: hml
 

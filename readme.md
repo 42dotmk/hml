@@ -67,6 +67,8 @@ hml search       query it, notmuch-style (see below)
 hml count        how many messages/threads/files match
 hml tags         every tag, or the tags of the messages matching a query
 hml tag          hml tag +todo -inbox -- <query>: add/remove tags
+hml show         the matching messages: notmuch's text format, raw, mbox, one part
+hml reply        a reply template (headers + quoted text) for the newest match
 hml -d           distrust caches, re-verify with a full listing
 ```
 
@@ -120,6 +122,10 @@ hml tags                                   # every tag in the index
 hml tags from:linkedin.com                 # tags across the matches
 ```
 
+`hml count --batch` reads one query per stdin line and prints one count
+per line; `--` ends the options everywhere, so `hml search -- <query>`
+works as the notmuch habit has it.
+
 Terms: bare words (all fields), `subject:` `from:` `to:` `attachment:`
 `body:`, `tag:`, `id:`, `thread:`, `path:cc/**` (an account) or
 `path:cc/Sent` (one box), `date:2026-08-01..2026-08-21`, `date:7d..`,
@@ -133,7 +139,10 @@ with any of them:
   the maildir flags; `sent`/`draft`/`deleted` from the folder (the
   `foldertags` table in `config.h`); `inbox` for anything not in one of
   those folders — so what Gmail shows on your phone and what
-  `tag:inbox` returns are the same set.
+  `tag:inbox` returns are the same set; `attachment` for a message that
+  carries a real attachment (a part with disposition `attachment`, or a
+  named non-text part that is not a `Content-ID` image the HTML embeds —
+  signature parts like `smime.p7s` don't count).
 - **Rules** in `config.h`, applied to every newly indexed message:
   `{"+linkedin", "from:linkedin.com"}`, `{"+quora -inbox",
   "from:quora.com"}`. What notmuch needs a post-new hook and a rules
@@ -143,6 +152,34 @@ with any of them:
   +todo TAB -inbox`), keyed by Message-ID. Delete the whole index and
   `hml new` rebuilds it and replays the log; manual edits always beat
   rules.
+
+`unread`, `flagged`, `replied` and `passed` are not tags at all but the
+maildir flags themselves (S inverted, F, R, P): `hml tag -unread` renames
+the message's files (a seen message also graduates from `new/` to
+`cur/`), the index row follows, and the next `hml recv` pushes the flag
+to the server — reading a message in `hed` marks it read on your phone.
+They are never logged or overridden, so what the files say is always the
+truth.
+
+## Show & reply
+
+What a mail reader needs beyond search, so `hed`'s mail plugin (and any
+notmuch-shaped MUA) runs on hml alone:
+
+```
+hml show -- thread:000000000002c119          # notmuch's --format=text framing
+hml show --include-html -- id:<message-id>   # text/html bodies included
+hml show --format=raw -- id:<message-id>     # the message file, verbatim
+hml show --format=raw --part=5 -- id:<...>   # one MIME part, decoded (save an attachment)
+hml show --format=mbox -- thread:<...>       # an mbox (git am, mutt -f)
+hml reply --reply-to=all -- thread:<...>     # From/To/Cc/Subject/In-Reply-To/References + "> " quote
+```
+
+Parts are numbered pre-order from 1 exactly like notmuch, so the id a
+reader picks out of the text output addresses the same part in
+`--format=raw --part=N`. `reply` answers the newest message of the match
+from the account whose maildir holds it; `--reply-to=all` keeps every
+other recipient in Cc and drops your own addresses.
 
 ## Configuration
 
@@ -223,8 +260,8 @@ and pthreads. That's it — the only vendored file is `stb_ds.h`.
 ## Status & roadmap
 
 In daily production use for the author's mail (synced every 5 minutes,
-`hed`'s mail plugin on top). The search index is new: it agrees with
-notmuch on the same store query for query, and is meant to replace it.
-Next: `hml show`; then per-folder connection fan-out,
-COMPRESS=DEFLATE, and an IDLE daemon — one long-lived connection per
-account instead of hundreds of logins a day.
+`hed`'s mail plugin on top, which runs on hml alone — search, tags,
+show, reply and send). The search index agrees with notmuch on the same
+store query for query and has replaced it. Next: per-folder connection
+fan-out, COMPRESS=DEFLATE, and an IDLE daemon — one long-lived
+connection per account instead of hundreds of logins a day.
