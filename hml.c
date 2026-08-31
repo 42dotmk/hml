@@ -136,6 +136,7 @@ static int usage(int rc) {
           "           [--sort=newest-first|oldest-first] <query>\n"
           "  count    hml count [--output=messages|threads|files] <query>\n"
           "  tags     hml tags [<query>]: every tag, or those of the matches\n"
+          "  tag      hml tag +tag|-tag ... [--] <query>: add/remove tags\n"
           "  -d       distrust caches, verify with a full listing\n"
           "  -v       print version\n",
           stderr);
@@ -164,6 +165,8 @@ int main(int argc, char *argv[]) {
             return countmain(argc - 2, argv + 2);
         } else if (!strcmp(argv[1], "tags")) {
             return tagsmain(argc - 2, argv + 2);
+        } else if (!strcmp(argv[1], "tag")) {
+            return tagmain(argc - 2, argv + 2);
         } else {
             /* not a command: an account name filters the status report */
             for (k = 0; k < naccounts; k++)

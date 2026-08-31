@@ -1,9 +1,17 @@
 /* index.c - "hml new": the search index, SQLite + FTS5 at
  * <mailroot>/.hml.db. One row per message (Message-ID), one per maildir
  * file, tags derived from flags and folders, threads from References. The
- * index is an hml-only cache: deleting it costs a rebuild, nothing else. */
+ * index is an hml-only cache: deleting it costs a rebuild, nothing else.
+ *
+ * "hml tag": user tags are overrides on the derived set, keyed by
+ * Message-ID so they survive a message leaving and re-entering the store.
+ * Their source of truth is the append-only log <mailroot>/.htags (one
+ * "mid TAB +tag TAB -tag" line per operation); the utag table mirrors it
+ * and the meta table remembers how much of the log has been applied, so
+ * a rebuilt index replays the rest. */
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sqlite3.h>
 #include <stdio.h>
@@ -36,6 +44,10 @@ static const char *schema =
     "CREATE TABLE IF NOT EXISTS tag(msg INTEGER NOT NULL, name TEXT NOT NULL,"
     " PRIMARY KEY(msg, name)) WITHOUT ROWID;"
     "CREATE INDEX IF NOT EXISTS tag_name ON tag(name, msg);"
+    "CREATE TABLE IF NOT EXISTS utag(mid TEXT NOT NULL, name TEXT NOT NULL,"
+    " val INTEGER NOT NULL, PRIMARY KEY(mid, name)) WITHOUT ROWID;"
+    "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, val);"
+    "CREATE TEMP TABLE IF NOT EXISTS newmsg(id INTEGER PRIMARY KEY);"
     "CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(subject, sender, rcpt,"
     " attach, body, content='', contentless_delete=1,"
     " tokenize='unicode61 remove_diacritics 2');";
@@ -69,12 +81,15 @@ typedef struct {
     sqlite3 *db;
     sqlite3_stmt *msgbymid, *insmsg, *setthread, *merge, *insfts, *delfts,
         *insref, *delref, *insfile, *mvfile, *delfile, *filemsg, *nfiles,
-        *delmsg, *deltag, *instag, *msgfiles, *boxfiles, *dirget, *dirset;
+        *delmsg, *deltag, *instag, *msgfiles, *boxfiles, *dirget, *dirset,
+        *midof, *utagget, *utagset, *metaget, *metaset, *insnew;
     long added, moved, removed, newmsgs;
 } Db;
 
+static const char *cmdname = "new";
+
 static void die(Db *d, const char *what) {
-    fprintf(stderr, "hml new: %s: %s\n", what, sqlite3_errmsg(d->db));
+    fprintf(stderr, "hml %s: %s: %s\n", cmdname, what, sqlite3_errmsg(d->db));
     exit(2);
 }
 
@@ -112,6 +127,13 @@ static void prepall(Db *d) {
         prep(d, "SELECT base,sub,name,flags,msg FROM file WHERE box=?");
     d->dirget = prep(d, "SELECT mtime FROM dir WHERE path=?");
     d->dirset = prep(d, "INSERT OR REPLACE INTO dir(path,mtime) VALUES(?,?)");
+    d->midof = prep(d, "SELECT mid FROM msg WHERE id=?");
+    d->utagget = prep(d, "SELECT name,val FROM utag WHERE mid=?");
+    d->utagset =
+        prep(d, "INSERT OR REPLACE INTO utag(mid,name,val) VALUES(?,?,?)");
+    d->metaget = prep(d, "SELECT val FROM meta WHERE key=?");
+    d->metaset = prep(d, "INSERT OR REPLACE INTO meta(key,val) VALUES(?,?)");
+    d->insnew = prep(d, "INSERT OR IGNORE INTO newmsg(id) VALUES(?)");
 }
 
 /* run a statement to completion; returns the first column of the first
@@ -132,6 +154,10 @@ static void bindtext(sqlite3_stmt *st, int i, const char *s) {
     sqlite3_bind_text(st, i, s, -1, SQLITE_TRANSIENT);
 }
 
+static void sadd(char **s, const char *t) {
+    memcpy(arraddnptr(*s, strlen(t)), t, strlen(t));
+}
+
 static void exec(Db *d, const char *sql) {
     if (sqlite3_exec(d->db, sql, NULL, NULL, NULL) != SQLITE_OK)
         die(d, sql);
@@ -139,10 +165,10 @@ static void exec(Db *d, const char *sql) {
 
 /* --- tags -------------------------------------------------------------- */
 
-/* recompute the derived tags of one message from its files */
+/* recompute the tags of one message: derived from its files' flags and
+ * folders, then the user's overrides applied on top */
 static void retag(Db *d, sqlite3_int64 id) {
-    const char *tags[16];
-    char flags[64] = "";
+    char *tags[32], flags[64] = "", *mid = NULL;
     int nt = 0, folder = 0, i, k, rc;
 
     sqlite3_bind_int64(d->msgfiles, 1, id);
@@ -162,30 +188,247 @@ static void retag(Db *d, sqlite3_int64 id) {
                 if (!strcmp(tags[k], foldertags[i].tag))
                     break;
             if (k == nt && nt < 8)
-                tags[nt++] = foldertags[i].tag;
+                tags[nt++] = strdup(foldertags[i].tag);
         }
     }
     if (rc != SQLITE_DONE)
         die(d, "msgfiles");
     sqlite3_reset(d->msgfiles);
     if (!folder)
-        tags[nt++] = "inbox";
+        tags[nt++] = strdup("inbox");
     if (!strchr(flags, 'S'))
-        tags[nt++] = "unread";
+        tags[nt++] = strdup("unread");
     if (strchr(flags, 'F'))
-        tags[nt++] = "flagged";
+        tags[nt++] = strdup("flagged");
     if (strchr(flags, 'R'))
-        tags[nt++] = "replied";
+        tags[nt++] = strdup("replied");
     if (strchr(flags, 'D'))
-        tags[nt++] = "draft";
+        tags[nt++] = strdup("draft");
     if (strchr(flags, 'P'))
-        tags[nt++] = "passed";
+        tags[nt++] = strdup("passed");
+    /* overrides: +tag adds, -tag removes, latest write per name wins */
+    sqlite3_bind_int64(d->midof, 1, id);
+    if (sqlite3_step(d->midof) == SQLITE_ROW)
+        mid = strdup((const char *)sqlite3_column_text(d->midof, 0));
+    sqlite3_reset(d->midof);
+    if (mid) {
+        bindtext(d->utagget, 1, mid);
+        while ((rc = sqlite3_step(d->utagget)) == SQLITE_ROW) {
+            const char *name = (const char *)sqlite3_column_text(d->utagget, 0);
+            int on = sqlite3_column_int(d->utagget, 1);
+            for (k = 0; k < nt; k++)
+                if (!strcmp(tags[k], name))
+                    break;
+            if (on && k == nt && nt < (int)(sizeof tags / sizeof *tags))
+                tags[nt++] = strdup(name);
+            else if (!on && k < nt) {
+                free(tags[k]);
+                tags[k] = tags[--nt];
+            }
+        }
+        if (rc != SQLITE_DONE)
+            die(d, "utagget");
+        sqlite3_reset(d->utagget);
+        free(mid);
+    }
     sqlite3_bind_int64(d->deltag, 1, id);
     step1(d, d->deltag);
     for (i = 0; i < nt; i++) {
         sqlite3_bind_int64(d->instag, 1, id);
         bindtext(d->instag, 2, tags[i]);
         step1(d, d->instag);
+        free(tags[i]);
+    }
+}
+
+/* --- user tags --------------------------------------------------------- */
+
+typedef struct {
+    char *name;
+    int on; /* 1 = +name, 0 = -name */
+} Op;
+
+/* "+a -b ..." (space, tab or argv-separated) -> ops; -1 on a bad token */
+static int parseops(const char *spec, Op **ops) {
+    const char *p = spec, *e;
+    Op o;
+
+    for (;;) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (!*p)
+            return 0;
+        for (e = p; *e && *e != ' ' && *e != '\t'; e++)
+            ;
+        if ((*p != '+' && *p != '-') || e - p < 2)
+            return -1;
+        o.on = *p == '+';
+        o.name = malloc((size_t)(e - p));
+        memcpy(o.name, p + 1, (size_t)(e - p - 1));
+        o.name[e - p - 1] = '\0';
+        arrput(*ops, o);
+        p = e;
+    }
+}
+
+static void freeops(Op *ops) {
+    ptrdiff_t i;
+
+    for (i = 0; i < arrlen(ops); i++)
+        free(ops[i].name);
+    arrfree(ops);
+}
+
+/* record the overrides for one message and refresh its tags if indexed */
+static void applyops(Db *d, const char *mid, const Op *ops) {
+    ptrdiff_t i;
+    sqlite3_int64 id;
+
+    for (i = 0; i < arrlen(ops); i++) {
+        bindtext(d->utagset, 1, mid);
+        bindtext(d->utagset, 2, ops[i].name);
+        sqlite3_bind_int(d->utagset, 3, ops[i].on);
+        step1(d, d->utagset);
+    }
+    bindtext(d->msgbymid, 1, mid);
+    if ((id = step1(d, d->msgbymid)) >= 0)
+        retag(d, id);
+}
+
+static void taglogpath(char *dst, size_t cap) {
+    size_t n;
+
+    expand(mailroot, dst, cap);
+    n = strlen(dst);
+    snprintf(dst + n, cap - n, "/.htags");
+}
+
+/* one log line per message: mid TAB +a TAB -b */
+static void logline(char **buf, const char *mid, const Op *ops) {
+    ptrdiff_t i;
+
+    sadd(buf, mid);
+    for (i = 0; i < arrlen(ops); i++) {
+        sadd(buf, ops[i].on ? "\t+" : "\t-");
+        sadd(buf, ops[i].name);
+    }
+    sadd(buf, "\n");
+}
+
+/* append lines to the log, durably; returns the log size afterwards, or
+ * -1. Callers hold the database write lock, which serializes writers */
+static long taglogappend(const char *buf, size_t n) {
+    char path[4096];
+    int fd;
+    long size;
+
+    taglogpath(path, sizeof path);
+    if ((fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0600)) < 0)
+        return -1;
+    while (n) {
+        ssize_t w = write(fd, buf, n);
+        if (w < 0) {
+            close(fd);
+            return -1;
+        }
+        buf += w;
+        n -= (size_t)w;
+    }
+    fsync(fd);
+    size = (long)lseek(fd, 0, SEEK_END);
+    close(fd);
+    return size;
+}
+
+static long metaint(Db *d, const char *key) {
+    long v;
+
+    bindtext(d->metaget, 1, key);
+    v = (long)step1(d, d->metaget);
+    return v < 0 ? 0 : v;
+}
+
+static void metaset(Db *d, const char *key, long v) {
+    bindtext(d->metaset, 1, key);
+    sqlite3_bind_int64(d->metaset, 2, v);
+    step1(d, d->metaset);
+}
+
+/* apply whatever the log holds beyond what this index has seen; only
+ * complete lines count, a writer may be mid-line */
+static void taglogreplay(Db *d) {
+    char path[4096], *buf, *line, *nl, *tab;
+    long off = metaint(d, "taglog"), size, done;
+    FILE *f;
+    size_t n;
+    Op *ops;
+
+    taglogpath(path, sizeof path);
+    if (!(f = fopen(path, "rb")))
+        return;
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    if (size <= off) {
+        fclose(f);
+        return;
+    }
+    fseek(f, off, SEEK_SET);
+    buf = malloc((size_t)(size - off) + 1);
+    n = fread(buf, 1, (size_t)(size - off), f);
+    fclose(f);
+    buf[n] = '\0';
+    done = off;
+    for (line = buf; (nl = strchr(line, '\n')); line = nl + 1) {
+        *nl = '\0';
+        done = off + (nl - buf) + 1;
+        if (!(tab = strchr(line, '\t')))
+            continue;
+        *tab = '\0';
+        ops = NULL;
+        if (parseops(tab + 1, &ops) == 0)
+            applyops(d, line, ops);
+        freeops(ops);
+    }
+    free(buf);
+    metaset(d, "taglog", done);
+}
+
+/* config.h rules against the messages this run indexed */
+static void applyrules(Db *d) {
+    Query q;
+    sqlite3_stmt *st;
+    char *err = NULL;
+    Op *ops;
+    int i, rc;
+
+    for (i = 0; i < ntagrules; i++) {
+        ops = NULL;
+        if (parseops(tagrules[i].tags, &ops) < 0 ||
+            querycompile(tagrules[i].query, &q, &err) < 0) {
+            fprintf(stderr, "hml new: tag rule %d: %s\n", i,
+                    err ? err : "bad tag list");
+            free(err);
+            err = NULL;
+            freeops(ops);
+            continue;
+        }
+        st = queryprep(d->db,
+                       "SELECT mid FROM msg WHERE id IN (SELECT id FROM "
+                       "newmsg) AND (%s)",
+                       &q, "", &err);
+        if (!st) {
+            fprintf(stderr, "hml new: tag rule %d: %s\n", i, err);
+            free(err);
+            err = NULL;
+        } else {
+            while ((rc = sqlite3_step(st)) == SQLITE_ROW)
+                applyops(d, (const char *)sqlite3_column_text(st, 0), ops);
+            if (rc != SQLITE_DONE)
+                die(d, "rule");
+            sqlite3_finalize(st);
+        }
+        queryfree(&q);
+        freeops(ops);
     }
 }
 
@@ -194,10 +437,6 @@ static void retag(Db *d, sqlite3_int64 id) {
 /* the thread a new message joins: that of any message it references, or
  * any message referencing it or sharing a reference (JWZ connectivity);
  * several such threads are merged into the lowest. 0 = starts its own */
-static void sadd(char **s, const char *t) {
-    memcpy(arraddnptr(*s, strlen(t)), t, strlen(t));
-}
-
 static sqlite3_int64 threadfor(Db *d, const Mail *m) {
     char *sql = NULL;
     sqlite3_stmt *st;
@@ -294,6 +533,8 @@ static void addfile(Db *d, const Job *j, const Mail *m) {
             bindtext(d->insref, 2, m->refs[i]);
             step1(d, d->insref);
         }
+        sqlite3_bind_int64(d->insnew, 1, id);
+        step1(d, d->insnew);
         d->newmsgs++;
     }
     snprintf(base, sizeof base, "%.*s", (int)baselen(j->name), j->name);
@@ -554,7 +795,7 @@ static void index_(Db *d, Scan *sc) {
         done++;
         if (done % 2000 == 0) {
             exec(d, "COMMIT");
-            exec(d, "BEGIN");
+            exec(d, "BEGIN IMMEDIATE");
         }
         if (tty && done % 500 == 0)
             fprintf(stderr, "\r%ld/%ld", done, n);
@@ -589,7 +830,7 @@ int newmain(int argc, char **argv) {
     prepall(&d);
     clock_gettime(CLOCK_MONOTONIC, &t0);
     sc.now = (long)time(NULL);
-    exec(&d, "BEGIN");
+    exec(&d, "BEGIN IMMEDIATE");
     for (i = 0; i < naccounts; i++) {
         expand(accounts[i].maildir, root, sizeof root);
         for (k = 0; k < accounts[i].nchannels; k++) {
@@ -602,11 +843,14 @@ int newmain(int argc, char **argv) {
     }
     exec(&d, "COMMIT");
     if (arrlen(sc.jobs)) {
-        exec(&d, "BEGIN");
+        exec(&d, "BEGIN IMMEDIATE");
         index_(&d, &sc);
         exec(&d, "COMMIT");
     }
-    exec(&d, "BEGIN");
+    exec(&d, "BEGIN IMMEDIATE");
+    if (d.newmsgs)
+        applyrules(&d);
+    taglogreplay(&d); /* after the rules: manual edits win on a rebuild */
     for (j = 0; j < arrlen(sc.dirs); j++) {
         bindtext(d.dirset, 1, sc.dirs[j].path);
         sqlite3_bind_int64(d.dirset, 2, sc.dirs[j].mtime);
@@ -621,5 +865,91 @@ int newmain(int argc, char **argv) {
                (double)(t1.tv_sec - t0.tv_sec) +
                    (double)(t1.tv_nsec - t0.tv_nsec) / 1e9);
     sqlite3_close_v2(d.db);
+    return 0;
+}
+
+int tagmain(int argc, char **argv) {
+    Db d;
+    Query q;
+    sqlite3_stmt *st;
+    Op *ops = NULL;
+    char *spec = NULL, *query = NULL, *log = NULL, *err = NULL, dberr[256];
+    long size;
+    int i, rc;
+
+    cmdname = "tag";
+    for (i = 0; i < argc && (argv[i][0] == '+' || argv[i][0] == '-'); i++) {
+        if (!strcmp(argv[i], "--")) {
+            i++;
+            break;
+        }
+        sadd(&spec, argv[i]);
+        sadd(&spec, " ");
+    }
+    for (; i < argc; i++) {
+        if (query)
+            sadd(&query, " ");
+        sadd(&query, argv[i]);
+    }
+    if (spec)
+        arrput(spec, '\0');
+    if (query)
+        arrput(query, '\0');
+    if (!spec || !query || parseops(spec, &ops) < 0 || !arrlen(ops)) {
+        fputs("usage: hml tag +tag|-tag ... [--] <query>\n", stderr);
+        arrfree(spec);
+        arrfree(query);
+        freeops(ops);
+        return 2;
+    }
+    for (i = 0; i < arrlen(ops); i++)
+        if (strpbrk(ops[i].name, " \t\n")) {
+            fprintf(stderr, "hml tag: bad tag '%s'\n", ops[i].name);
+            freeops(ops);
+            return 2;
+        }
+    if (querycompile(query, &q, &err) < 0) {
+        fprintf(stderr, "hml tag: %s\n", err);
+        free(err);
+        freeops(ops);
+        return 2;
+    }
+    memset(&d, 0, sizeof d);
+    if (!(d.db = dbopen(dberr, sizeof dberr))) {
+        fprintf(stderr, "hml tag: %s\n", dberr);
+        return 2;
+    }
+    prepall(&d);
+    exec(&d, "BEGIN IMMEDIATE");
+    if (!(st = queryprep(d.db, "SELECT mid FROM msg WHERE %s", &q, "", &err))) {
+        fprintf(stderr, "hml tag: %s\n", err);
+        return 2;
+    }
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        const char *mid = (const char *)sqlite3_column_text(st, 0);
+        if (strpbrk(mid, "\t\n"))
+            continue; /* cannot be logged faithfully; never seen */
+        logline(&log, mid, ops);
+        applyops(&d, mid, ops);
+    }
+    if (rc != SQLITE_DONE)
+        die(&d, "tag");
+    sqlite3_finalize(st);
+    if (arrlen(log)) {
+        if ((size = taglogappend(log, arrlenu(log))) < 0) {
+            fprintf(stderr, "hml tag: cannot write tag log: %s\n",
+                    strerror(errno));
+            exec(&d, "ROLLBACK");
+            return 2;
+        }
+        metaset(&d, "taglog", size);
+    }
+    exec(&d, "COMMIT");
+    sqlite3_close_v2(d.db);
+    arrfree(log);
+    queryfree(&q);
+    freeops(ops);
+    arrfree(spec);
+    arrfree(query);
     return 0;
 }

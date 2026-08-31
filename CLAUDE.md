@@ -99,19 +99,36 @@ How the index works (index.c, mime.c, query.c):
   anything sharing a reference (`ref` table); several become one via
   `UPDATE msg SET thread`. Thread ids are the root's row id, printed as
   16 hex digits like notmuch.
-- Tags are *derived*, recomputed per message whenever one of its files
-  changes: `unread`/`flagged`/`replied`/`draft`/`passed` from the union
-  of its files' maildir flags, folder tags from `foldertags` in
-  config.h (Sent→sent, Drafts→draft, Trash→deleted), `inbox` when no
-  file is in a listed folder. User tags (`hml tag +x -y`, tag rules in
-  config.h, an append-only tag log the index is rebuilt from) are the
-  next step; `hml show` too.
+- Tags: `retag` recomputes a message's `tag` rows whenever one of its
+  files changes or its overrides do. Derived first —
+  `unread`/`flagged`/`replied`/`draft`/`passed` from the union of its
+  files' maildir flags, folder tags from `foldertags` in config.h
+  (Sent→sent, Drafts→draft, Trash→deleted), `inbox` when no file is in
+  a listed folder — then user overrides from `utag` applied on top
+  (`+x` adds, `-x` removes, latest write per name wins). `utag` is keyed
+  by Message-ID, not row id, so tags survive a message leaving and
+  re-entering the store and can be recorded before the message exists.
+- User tags' source of truth is the append-only log
+  `<mailroot>/.htags`: one `mid TAB +a TAB -b` line per message per
+  `hml tag` call. `hml tag` runs inside `BEGIN IMMEDIATE`, appends +
+  fsyncs the log, applies the ops, and stores the log size in
+  `meta(taglog)`; `hml new` replays everything past that offset at the
+  end of its run, so a deleted DB is rebuilt faithfully. All log writers
+  hold the DB write lock, which keeps the offset consistent.
+- `tagrules` in config.h (the user's former notmuch `tags.rules`, minus
+  `tag:new`) are applied by `hml new` to the messages it just inserted
+  (tracked in a temp `newmsg` table), *before* the log replay so a
+  manual edit always beats a rule on rebuild. Rule hits are not logged:
+  a rebuild re-applies the current rules to everything, which is the
+  wanted semantics when rules change.
 - The index is an hml-only cache under the interop contract: delete
-  `.hml.db*` and `hml new` rebuilds it. `postrecv` still runs
-  `notmuch new`; switch it to `hml new` (or run both) to go live.
+  `.hml.db*` and `hml new` rebuilds it (36s including rules). Never
+  delete `.htags`. `postrecv` still runs `notmuch new`; switch it to
+  `hml new` (or run both) to go live.
 
-Next: `hml tag` + tag log + config.h tag rules, `hml show`, then
-per-folder connection fan-out, COMPRESS=DEFLATE, IDLE daemon mode.
+Next: `hml show` (raw / json / --part), a hed mail plugin `B` binding
+listing tags via `hml tags`, then per-folder connection fan-out,
+COMPRESS=DEFLATE, IDLE daemon mode.
 
 ## Gmail quirks (learned the hard way, keep in mind)
 
@@ -169,11 +186,14 @@ per-folder connection fan-out, COMPRESS=DEFLATE, IDLE daemon mode.
   headers, charset conversion via iconv, MIME walk, base64/QP, HTML
   stripped to text, attachment names, References). No dependencies
   beyond libc; threads call it concurrently.
-- `index.c` — `hml new` and the schema: maildir diff, parallel parse,
-  threading, derived tags. `dbopen` is shared with query.c.
+- `index.c` — `hml new`, `hml tag` and the schema: maildir diff,
+  parallel parse, threading, derived tags + overrides, the tag log and
+  its replay, config.h rules. `dbopen` is shared with query.c.
 - `query.c` — `hml search`/`count`/`tags`: the query parser (recursive
   descent, notmuch precedence: not > and > or, implicit and) compiled
-  to SQL with bound parameters, and the notmuch-shaped text/JSON output.
+  to SQL with bound parameters (`querycompile`/`queryprep`, also used by
+  index.c for rules and `hml tag`), and the notmuch-shaped text/JSON
+  output.
 - `imap.c` — TCP+TLS transport (`tlsconnect` is protocol-neutral; SMTP uses
   it too), logical line reader (streams literals to a file sink with CRLF
   conversion), tagged commands, FETCH body, APPEND.

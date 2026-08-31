@@ -50,3 +50,26 @@ const FolderTag foldertags[] = {
     {"Trash", "deleted"},
 };
 const int nfoldertags = LEN(foldertags);
+
+/* tag rules: `hml new` applies each to the messages it just indexed
+ * that match the query. Manual `hml tag` edits (kept in
+ * <mailroot>/.htags, replayed on rebuild) always win over rules. */
+const TagRule tagrules[] = {
+    /* codechem forms */
+    {"+job-application",
+     "from:mailer@codechem.com subject:\"New Contact Application\""},
+    {"+job-application",
+     "from:mailer@halicea.com subject:\"New Job Application\""},
+    {"+contact", "to:contact@codechem.com"},
+    /* notifications / newsletters */
+    {"+linkedin", "from:linkedin.com"},
+    {"+linkedin +job-alert", "from:jobalerts-noreply@linkedin.com"},
+    {"+github", "from:github.com"},
+    {"+slack", "from:slack.com"},
+    {"+hetzner", "from:hetzner.com"},
+    {"+quora -inbox", "from:quora.com"},
+    /* banking */
+    {"+bank +unibank", "from:unibank.com.mk"},
+    {"+bank +nlb", "from:nlb.mk or from:24x7.com.mk"},
+};
+const int ntagrules = LEN(tagrules);

@@ -48,6 +48,11 @@ typedef struct {
     const char *tag;    /* tag every message with a file in it gets */
 } FolderTag;
 
+typedef struct {
+    const char *tags;  /* "+tag -tag ..." */
+    const char *query; /* applied by `hml new` to newly indexed matches */
+} TagRule;
+
 /* config.h */
 extern const Account accounts[];
 extern const int naccounts;
@@ -56,6 +61,8 @@ extern const char *postsend; /* shell hook after `hml send`, "" = none */
 extern const char *mailroot; /* the index lives at <mailroot>/.hml.db */
 extern const FolderTag foldertags[];
 extern const int nfoldertags;
+extern const TagRule tagrules[];
+extern const int ntagrules;
 
 /* state.c - mbsync's on-disk sync state (.mbsyncstate), kept compatible so
  * mbsync and hml can be used interchangeably on the same store */
@@ -156,12 +163,26 @@ typedef struct {
 int mailparse(const char *buf, size_t n, Mail *m);
 void mailfree(Mail *m);
 
-/* index.c - the search index ("hml new") */
+/* index.c - the search index ("hml new") and user tags ("hml tag") */
 typedef struct sqlite3 sqlite3;
+typedef struct sqlite3_stmt sqlite3_stmt;
 sqlite3 *dbopen(char *err, size_t errlen);
 int newmain(int argc, char **argv);
+int tagmain(int argc, char **argv);
 
-/* query.c - "hml search", "hml count", "hml tags" */
+/* query.c - notmuch-style query -> SQL; "hml search", "hml count",
+ * "hml tags" */
+typedef struct {
+    char *sql;     /* stb char array: a WHERE expression over msg */
+    char **params; /* stb array of bound strings, in ? order */
+    char *err;
+} Query;
+
+int querycompile(const char *q, Query *c, char **err);
+/* prepare fmt with the expression spliced in at "%s", params bound */
+sqlite3_stmt *queryprep(sqlite3 *db, const char *fmt, const Query *c,
+                        const char *tail, char **err);
+void queryfree(Query *c);
 int searchmain(int argc, char **argv);
 int countmain(int argc, char **argv);
 int tagsmain(int argc, char **argv);

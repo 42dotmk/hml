@@ -28,12 +28,6 @@ typedef struct {
     char *err;     /* first parse/compile error, malloc'd */
 } Parser;
 
-typedef struct {
-    char *sql;     /* stb char array, the WHERE expression */
-    char **params; /* stb array of bound strings, in ? order */
-    char *err;
-} Comp;
-
 static void sadd(char **b, const char *t) {
     memcpy(arraddnptr(*b, strlen(t)), t, strlen(t));
 }
@@ -326,12 +320,12 @@ static char *ftsmatch(const char *col, const char *v) {
     return m;
 }
 
-static void bindparam(Comp *c, char *v) { /* takes ownership of v */
+static void bindparam(Query *c, char *v) { /* takes ownership of v */
     arrput(c->params, v);
     sadd(&c->sql, "?");
 }
 
-static void compterm(Comp *c, const Node *n) {
+static void compterm(Query *c, const Node *n) {
     const char *p = n->prefix, *v = n->val;
     char buf[64];
     long a, b;
@@ -402,7 +396,7 @@ static void compterm(Comp *c, const Node *n) {
         seterr(&c->err, "unknown prefix '%s:'", p);
 }
 
-static void compile(Comp *c, const Node *n) {
+static void compile(Query *c, const Node *n) {
     switch (n->op) {
     case NTerm:
         compterm(c, n);
@@ -421,8 +415,8 @@ static void compile(Comp *c, const Node *n) {
     }
 }
 
-/* query text -> WHERE expression over msg; NULL with a message on error */
-static int compilequery(const char *q, Comp *c, char **err) {
+/* query text -> WHERE expression over msg; -1 with a message on error */
+int querycompile(const char *q, Query *c, char **err) {
     Node *n = parse(q, err);
 
     memset(c, 0, sizeof *c);
@@ -443,7 +437,7 @@ static int compilequery(const char *q, Comp *c, char **err) {
     return 0;
 }
 
-static void compfree(Comp *c) {
+void queryfree(Query *c) {
     ptrdiff_t i;
 
     for (i = 0; i < arrlen(c->params); i++)
@@ -453,8 +447,8 @@ static void compfree(Comp *c) {
 }
 
 /* prepare sql with the query's WHERE spliced in at "%s", params bound */
-static sqlite3_stmt *prepq(sqlite3 *db, const char *fmt, const Comp *c,
-                           const char *tail, char **err) {
+sqlite3_stmt *queryprep(sqlite3 *db, const char *fmt, const Query *c,
+                        const char *tail, char **err) {
     char *sql = NULL;
     sqlite3_stmt *st;
     const char *pct = strstr(fmt, "%s");
@@ -617,16 +611,16 @@ static int cmpstr(const void *a, const void *b) {
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
-static int summary(sqlite3 *db, const Comp *c, const Opts *o, char **err) {
+static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     sqlite3_stmt *st, *total;
     Thread *ts = NULL, *t;
     ptrdiff_t i, k, n;
     int json = !strcmp(o->format, "json"), threadsonly, rc;
     char date[32];
 
-    if (!(st = prepq(db,
-                     "SELECT id,thread,date,sender,subject FROM msg WHERE %s",
-                     c, " ORDER BY thread,date", err)))
+    if (!(st = queryprep(
+              db, "SELECT id,thread,date,sender,subject FROM msg WHERE %s", c,
+              " ORDER BY thread,date", err)))
         return -1;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         sqlite3_int64 id = sqlite3_column_int64(st, 0);
@@ -734,7 +728,7 @@ static int summary(sqlite3 *db, const Comp *c, const Opts *o, char **err) {
 }
 
 /* messages / files / tags: one string per line, or a JSON array */
-static int listing(sqlite3 *db, const Comp *c, const Opts *o, char **err) {
+static int listing(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     sqlite3_stmt *st;
     char tail[128], line[8192];
     const char *sql;
@@ -759,7 +753,7 @@ static int listing(sqlite3 *db, const Comp *c, const Opts *o, char **err) {
         seterr(err, "unknown output '%s'", o->output);
         return -1;
     }
-    if (!(st = prepq(db, sql, c, tail, err)))
+    if (!(st = queryprep(db, sql, c, tail, err)))
         return -1;
     if (json)
         putchar('[');
@@ -842,7 +836,7 @@ static int fail(const char *cmd, char *err) {
 
 int searchmain(int argc, char **argv) {
     Opts o = {"summary", "text", -1, 0, 0};
-    Comp c;
+    Query c;
     sqlite3 *db;
     char *q, *err = NULL, dberr[256];
     int rc;
@@ -857,27 +851,27 @@ int searchmain(int argc, char **argv) {
         arrfree(q);
         return 2;
     }
-    if (compilequery(q, &c, &err) < 0) {
+    if (querycompile(q, &c, &err) < 0) {
         arrfree(q);
         return fail("search", err);
     }
     arrfree(q);
     if (!(db = dbopen(dberr, sizeof dberr))) {
-        compfree(&c);
+        queryfree(&c);
         return fail("search", strdup(dberr));
     }
     if (!strcmp(o.output, "summary") || !strcmp(o.output, "threads"))
         rc = summary(db, &c, &o, &err);
     else
         rc = listing(db, &c, &o, &err);
-    compfree(&c);
+    queryfree(&c);
     sqlite3_close(db);
     return rc < 0 ? fail("search", err) : 0;
 }
 
 int countmain(int argc, char **argv) {
     Opts o = {"messages", "text", -1, 0, 0};
-    Comp c;
+    Query c;
     sqlite3 *db;
     sqlite3_stmt *st;
     const char *sql;
@@ -891,7 +885,7 @@ int countmain(int argc, char **argv) {
         sadd(&q, "*");
         arrput(q, '\0');
     }
-    if (compilequery(q, &c, &err) < 0) {
+    if (querycompile(q, &c, &err) < 0) {
         arrfree(q);
         return fail("count", err);
     }
@@ -904,19 +898,19 @@ int countmain(int argc, char **argv) {
     else
         sql = "SELECT COUNT(*) FROM msg WHERE %s";
     if (!(db = dbopen(dberr, sizeof dberr))) {
-        compfree(&c);
+        queryfree(&c);
         return fail("count", strdup(dberr));
     }
-    if (!(st = prepq(db, sql, &c, "", &err)) ||
+    if (!(st = queryprep(db, sql, &c, "", &err)) ||
         sqlite3_step(st) != SQLITE_ROW) {
         seterr(&err, "%s", sqlite3_errmsg(db));
-        compfree(&c);
+        queryfree(&c);
         sqlite3_close(db);
         return fail("count", err);
     }
     printf("%lld\n", (long long)sqlite3_column_int64(st, 0));
     sqlite3_finalize(st);
-    compfree(&c);
+    queryfree(&c);
     sqlite3_close(db);
     return 0;
 }
@@ -924,7 +918,7 @@ int countmain(int argc, char **argv) {
 /* every tag in the index, or those of the messages matching a query */
 int tagsmain(int argc, char **argv) {
     Opts o = {"tags", "text", -1, 0, 0};
-    Comp c;
+    Query c;
     sqlite3 *db;
     char *q, *err = NULL, dberr[256];
     int rc;
@@ -938,17 +932,17 @@ int tagsmain(int argc, char **argv) {
         sadd(&q, "*");
         arrput(q, '\0');
     }
-    if (compilequery(q, &c, &err) < 0) {
+    if (querycompile(q, &c, &err) < 0) {
         arrfree(q);
         return fail("tags", err);
     }
     arrfree(q);
     if (!(db = dbopen(dberr, sizeof dberr))) {
-        compfree(&c);
+        queryfree(&c);
         return fail("tags", strdup(dberr));
     }
     rc = listing(db, &c, &o, &err);
-    compfree(&c);
+    queryfree(&c);
     sqlite3_close(db);
     return rc < 0 ? fail("tags", err) : 0;
 }

@@ -66,6 +66,7 @@ hml new          update the search index from the maildirs
 hml search       query it, notmuch-style (see below)
 hml count        how many messages/threads/files match
 hml tags         every tag, or the tags of the messages matching a query
+hml tag          hml tag +todo -inbox -- <query>: add/remove tags
 hml -d           distrust caches, re-verify with a full listing
 ```
 
@@ -125,12 +126,23 @@ Terms: bare words (all fields), `subject:` `from:` `to:` `attachment:`
 `date:yesterday..today`, `date:2026-08`; `and`/`or`/`not`, parentheses,
 implicit `and`; a trailing `*` makes a prefix match.
 
-Tags are derived, never stored: `unread`, `flagged`, `replied`,
-`draft`, `passed` from the maildir flags, `sent`/`draft`/`deleted` from
-the folder (the `foldertags` table in `config.h`), `inbox` for anything
-not in one of those folders — so what Gmail shows on your phone and what
-`tag:inbox` returns are the same set. User tags and tagging rules are
-next.
+Tags come from three places, and the index never has to be trusted
+with any of them:
+
+- **Derived**: `unread`, `flagged`, `replied`, `draft`, `passed` from
+  the maildir flags; `sent`/`draft`/`deleted` from the folder (the
+  `foldertags` table in `config.h`); `inbox` for anything not in one of
+  those folders — so what Gmail shows on your phone and what
+  `tag:inbox` returns are the same set.
+- **Rules** in `config.h`, applied to every newly indexed message:
+  `{"+linkedin", "from:linkedin.com"}`, `{"+quora -inbox",
+  "from:quora.com"}`. What notmuch needs a post-new hook and a rules
+  file for is a C table here.
+- **Manual**: `hml tag +todo -inbox -- from:boss`. Every edit is one
+  line in the append-only log `<mailroot>/.htags` (`message-id TAB
+  +todo TAB -inbox`), keyed by Message-ID. Delete the whole index and
+  `hml new` rebuilds it and replays the log; manual edits always beat
+  rules.
 
 ## Configuration
 
@@ -165,10 +177,15 @@ const int naccounts = LEN(accounts);
 const char *postrecv = "hml new";     /* after every `hml recv` */
 const char *postsend = "";            /* after a successful `hml send` */
 
-/* search index location and folder-derived tags */
+/* search index location, folder-derived tags, tag rules */
 const char *mailroot = "~/.mail";     /* index at <mailroot>/.hml.db */
 const FolderTag foldertags[] = {
     {"Sent", "sent"}, {"Drafts", "draft"}, {"Trash", "deleted"},
+};
+const TagRule tagrules[] = {
+    {"+linkedin", "from:linkedin.com"},
+    {"+quora -inbox", "from:quora.com"},
+    {"+bank +nlb", "from:nlb.mk or from:24x7.com.mk"},
 };
 ```
 
@@ -208,7 +225,6 @@ and pthreads. That's it — the only vendored file is `stb_ds.h`.
 In daily production use for the author's mail (synced every 5 minutes,
 `hed`'s mail plugin on top). The search index is new: it agrees with
 notmuch on the same store query for query, and is meant to replace it.
-Next: `hml tag` with an append-only tag log and tagging rules in
-`config.h`, `hml show`; then per-folder connection fan-out,
+Next: `hml show`; then per-folder connection fan-out,
 COMPRESS=DEFLATE, and an IDLE daemon — one long-lived connection per
 account instead of hundreds of logins a day.
