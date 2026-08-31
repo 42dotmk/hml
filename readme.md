@@ -1,46 +1,93 @@
 # hml
 
-Hackable mail: an IMAP/Maildir synchronizer, SMTP sender and search
-index in ~4,700 lines of C11. It reads and writes [mbsync](https://isync.sourceforge.io/)'s
-own on-disk state, so it is a **drop-in replacement you can adopt — and
-abandon — at any time**, on the same maildir, with zero migration and no
-re-downloading.
+**All of mail in one binary.** Receive, search, tag, read, reply and
+send — ~6,600 lines of C11, one `config.h`, one `make`. No daemon, no
+runtime config, no Python, no Xapian, no plugin tree. It is the mail
+stack behind [hed](../hed)'s mail plugin and it replaces mbsync,
+notmuch and msmtp on the author's desk, on three Gmail accounts holding
+180,000 messages.
 
 ```
-$ hml recv
-cc/All       remote 120363  local 117137  in sync (fast)
-cc/Drafts    remote      2  local      2  in sync (fast)
+$ hml recv                      # sync 3 accounts / 12 folders, steady state
+cc/All       remote 120363  local 120363  in sync (fast)
 cc/Sent      remote   5840  local   5840  in sync (fast)
-cc/Trash     remote     35  local    139  in sync (fast)
-km/All       remote  43777  local  43777  pulled 1
+km/All       remote  58574  local  58574  pulled 1
 ...
 2.73s
+$ hml search --limit=2 from:nikolaj and date:30d..
+thread:000000000001b94a    August 21 [1/1] Nikolaj Mihajlov; Invitation: Big core vol.2 @ Wed Sep 16 (inbox)
+thread:000000000000ddce    August 21 [1/1] Nikolaj Mihajlov; Green - Yearly retro notes for core (inbox)
+$ hml show --format=raw --part=4 -- thread:000000000001b94a > invite.ics
+$ hml reply -- thread:000000000000ddce > reply.eml       # edit it, then
+$ hml send -t < reply.eml
 ```
 
-## Why
+## Faster than what you are running now
 
-mbsync is correct, but every run re-lists every folder. On three Gmail
-accounts with ~170k messages that is **minutes** per sync. hml keeps a
-tiny per-folder cache (`.hmlstate`) of `UIDVALIDITY`, `UIDNEXT`,
-`HIGHESTMODSEQ`, `EXISTS` and the local `cur/`/`new/` mtimes. When
-nothing moved on either side, a folder is verified and skipped after a
-**single SELECT round-trip**. When something did move, flag deltas come
-from `CHANGEDSINCE` (CONDSTORE) and new mail from one
-`UID FETCH maxpulled+1:*` — never a full listing. Accounts sync in
-parallel, one thread each.
+Measured on the same store — 187,752 maildir files, 180,506 messages,
+23 GB — against the tools hml replaces. Same queries, same machine,
+warm cache.
 
-Steady state across 3 accounts / 12 folders: **~3 seconds**, most of it
-TLS handshakes. The cache is always safe to delete or find stale — hml
-falls back to a full verification, which is simply what mbsync does on
-every run.
+| | hml | mbsync / notmuch | |
+|---|---:|---:|---|
+| Steady-state sync, 3 accounts / 12 folders | **~3 s** | minutes | mbsync re-lists every folder on every run; hml verifies one in a single `SELECT` round-trip |
+| Initial index of the whole store | **37 s** | ≈12 min¹ | all cores parse, one thread writes |
+| Index on disk | **532 MB** | 3.2 GB | contentless FTS5: text is indexed, not stored twice |
+| `new` with nothing changed | **14 ms** | 550 ms | directory mtimes, nothing else touched |
+| `search tag:inbox` (158k threads) | **0.8 s** | 6.7 s | one SQL pass, threads aggregated in C |
+| `show --format=text` of a 434-message match | **78 ms** | 133 ms | |
+| `search --limit=20 from:… and date:2026` | 42 ms | 28 ms | point queries: both under the blink of a cursor |
 
-Speed is not bought with trust: the state file is written atomically
-(tmp + fsync + rename), near-side uids are reserved on disk *before*
-use so a crash can never reuse one, and anything hml cannot reconcile —
-a UIDVALIDITY change, an mbsync crash journal — stops with an error.
-It never guesses.
+¹ notmuch indexes ~250 files/s on this machine (single-threaded
+Xapian); extrapolated from a 1,257-file subset that took 4.9 s.
 
-## mbsync interop, precisely
+The sync speed is not a trick and not bought with trust. mbsync is
+correct but does a full listing of every folder every time — that is
+its design. hml keeps a tiny per-folder cache (`.hmlstate`) of
+`UIDVALIDITY`, `UIDNEXT`, `HIGHESTMODSEQ`, `EXISTS` and the local
+`cur/`/`new/` mtimes; when nothing moved on either side a folder is
+verified and done after one round-trip, and when something did, flag
+deltas come from `CHANGEDSINCE` (CONDSTORE) and new mail from one
+`UID FETCH maxpulled+1:*`. Accounts sync in parallel. Most of the ~3 s
+that remain are TLS handshakes and Gmail's login latency.
+
+Everything hml caches is safe to lose: delete `.hmlstate` and the next
+run does what mbsync does on every run; delete `.hml.db` and `hml new`
+rebuilds the index and replays your tag log. State that matters is
+written atomically (tmp + fsync + rename), near-side uids are reserved
+on disk *before* use so a crash can never reuse one, and anything hml
+cannot reconcile — a UIDVALIDITY change, an mbsync crash journal —
+stops with an error. It never guesses.
+
+## One binary, four jobs
+
+```
+hml              read-only status report (safe to run anytime)
+hml recv         sync: pull/push mail, flags and deletions      (mbsync)
+hml new          update the search index from the maildirs     (notmuch new)
+hml search       thread summaries, message ids, files, tags     (notmuch search)
+hml count        how many messages/threads/files match         (notmuch count)
+hml tags         every tag, or the tags across a query's matches
+hml tag          hml tag +todo -inbox -- <query>                (notmuch tag)
+hml show         notmuch's text format, raw bytes, mbox, one part (notmuch show)
+hml reply        a reply template for the newest match          (notmuch reply)
+hml send         SMTP submission, sendmail-compatible           (msmtp)
+hml recv -n      dry run: list exactly what recv would do
+hml recv cc km   limit to named accounts
+hml -d           distrust caches, re-verify with a full listing
+```
+
+The query language, the output formats and the part numbering are
+notmuch's, and the sendmail interface is msmtp's, so scripts, MUAs and
+habits port by swapping one command name. Exit codes: `0` in sync,
+`1` differences found (or folders skipped), `2` error. Status and
+dry-run never write anything.
+
+## Drop-in for mbsync — in both directions
+
+hml reads and writes mbsync's own on-disk state, so you can adopt it,
+and abandon it, at any time on the same maildir with zero migration and
+no re-downloading:
 
 - `<box>/.mbsyncstate` and `<box>/.uidvalidity` are read and written in
   mbsync's exact format; mbsync reports zero corrections on hml-written
@@ -54,59 +101,14 @@ It never guesses.
 Run mbsync on Monday, hml on Tuesday, mbsync again on Wednesday. Both
 sides agree.
 
-## Commands
-
-```
-hml              read-only status report (safe to run anytime)
-hml recv         sync: pull/push mail, flags and deletions
-hml recv -n      dry run: list exactly what recv would do
-hml recv cc km   limit to named accounts
-hml send         SMTP submission, sendmail-compatible (see below)
-hml new          update the search index from the maildirs
-hml search       query it, notmuch-style (see below)
-hml count        how many messages/threads/files match
-hml tags         every tag, or the tags of the messages matching a query
-hml tag          hml tag +todo -inbox -- <query>: add/remove tags
-hml show         the matching messages: notmuch's text format, raw, mbox, one part
-hml reply        a reply template (headers + quoted text) for the newest match
-hml -d           distrust caches, re-verify with a full listing
-```
-
-Exit codes: `0` in sync, `1` differences found (or folders skipped),
-`2` error. Status and dry-run never write anything.
-
-## Send
-
-`hml send` speaks the sendmail interface — `-t` (recipients from
-To/Cc/Bcc, with Bcc stripped before transmission), `-f` envelope
-sender, reading the message on stdin — so any MUA configured for
-msmtp or sendmail works by swapping one path:
-
-```
-# mutt / aerc / anything with a sendmail setting
-set sendmail = "~/.local/bin/hml send"
-
-# git
-git config sendemail.sendmailcmd "hml send"
-
-# by hand
-hml send -t < message.eml
-hml send -a work costa@example.com < message.eml
-```
-
-The account is picked by `-a name`, or matched from the From: header
-against the configured accounts. AUTH PLAIN over implicit TLS
-(port 465), dot-stuffing and Bcc handling included. With Gmail there is
-no duplicate-Sent dance: the server files the sent copy into
-`[Gmail]/Sent Mail` itself and the next `recv` picks it up.
-
-## Search
+## Search & tags
 
 `hml new` indexes every message into `<mailroot>/.hml.db` — SQLite
-with FTS5, nothing else. A full index of 188k files takes ~40 seconds
-on all cores and 525 MB; an unchanged store is verified in a few
-milliseconds by directory mtimes, the same way notmuch does it. The
-index is a cache: delete it and `hml new` rebuilds it.
+with FTS5, nothing else. Parsing runs on every core (RFC 2047 headers,
+every charset through iconv, base64/quoted-printable, HTML reduced to
+text, attachment names, References for threading) while one thread
+writes; an unchanged store is verified in milliseconds by directory
+mtimes. The index is a cache: delete it and `hml new` rebuilds it.
 
 Queries are notmuch's, so habits, scripts and MUAs port by swapping the
 command:
@@ -180,6 +182,31 @@ reader picks out of the text output addresses the same part in
 `--format=raw --part=N`. `reply` answers the newest message of the match
 from the account whose maildir holds it; `--reply-to=all` keeps every
 other recipient in Cc and drops your own addresses.
+
+## Send
+
+`hml send` speaks the sendmail interface — `-t` (recipients from
+To/Cc/Bcc, with Bcc stripped before transmission), `-f` envelope
+sender, reading the message on stdin — so any MUA configured for
+msmtp or sendmail works by swapping one path:
+
+```
+# mutt / aerc / anything with a sendmail setting
+set sendmail = "~/.local/bin/hml send"
+
+# git
+git config sendemail.sendmailcmd "hml send"
+
+# by hand
+hml send -t < message.eml
+hml send -a work costa@example.com < message.eml
+```
+
+The account is picked by `-a name`, or matched from the From: header
+against the configured accounts. AUTH PLAIN over implicit TLS
+(port 465), dot-stuffing and Bcc handling included. With Gmail there is
+no duplicate-Sent dance: the server files the sent copy into
+`[Gmail]/Sent Mail` itself and the next `recv` picks it up.
 
 ## Configuration
 
@@ -259,9 +286,11 @@ and pthreads. That's it — the only vendored file is `stb_ds.h`.
 
 ## Status & roadmap
 
-In daily production use for the author's mail (synced every 5 minutes,
+In daily production use for the author's mail: synced every 5 minutes,
 `hed`'s mail plugin on top, which runs on hml alone — search, tags,
-show, reply and send). The search index agrees with notmuch on the same
-store query for query and has replaced it. Next: per-folder connection
-fan-out, COMPRESS=DEFLATE, and an IDLE daemon — one long-lived
-connection per account instead of hundreds of logins a day.
+show, reply and send. The search index was checked against notmuch on
+the same store query for query before it replaced it, and mbsync
+stays interchangeable by design. Next: per-folder connection fan-out,
+COMPRESS=DEFLATE, and an IDLE daemon — one long-lived connection per
+account instead of hundreds of logins a day, which would take the
+steady-state sync from seconds to nothing.
