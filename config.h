@@ -14,12 +14,12 @@ static const Channel gmail[] = {
 };
 
 const Account accounts[] = {
-    {"cc", "imap.gmail.com", 993, "smtp.gmail.com", 465, "costa@codechem.com",
-     "gpg -q --for-your-eyes-only --no-tty -d "
-     "~/.password-store/costa@halicea.com.gpg",
-     "~/.mail/cc", gmail, LEN(gmail)},
-    {"km", "imap.gmail.com", 993, "smtp.gmail.com", 465,
-     "kosta.mihajlov@gmail.com",
+    {"cc", "imap.gmail.com", 993, "smtp.gmail.com", 465, 
+     "costa@codechem.com",
+     "gpg -q --for-your-eyes-only --no-tty -d ~/.password-store/costa@halicea.com.gpg",
+      "~/.mail/cc", gmail, LEN(gmail)},
+    {"km", "imap.gmail.com", 993, "smtp.gmail.com", 465, 
+      "kosta.mihajlov@gmail.com",
      "gpg -q --for-your-eyes-only --no-tty -d "
      "~/.password-store/kosta.mihajlov@gmail.com.gpg",
      "~/.mail/km", gmail, LEN(gmail)},
@@ -33,7 +33,7 @@ const int naccounts = LEN(accounts);
 
 /* shell commands run once after `hml recv` (all accounts done; not on
  * status or -n dry runs) and after a successful `hml send`; "" = none */
-const char *postrecv = "notmuch new";
+const char *postrecv = "hml new";
 const char *postsend = "";
 
 /* search index: <mailroot>/.hml.db, an hml-only cache that `hml new`
@@ -56,20 +56,26 @@ const int nfoldertags = LEN(foldertags);
  * <mailroot>/.htags, replayed on rebuild) always win over rules. */
 const TagRule tagrules[] = {
     /* codechem forms */
-    {"+job-application",
-     "from:mailer@codechem.com subject:\"New Contact Application\""},
-    {"+job-application",
-     "from:mailer@halicea.com subject:\"New Job Application\""},
-    {"+contact", "to:contact@codechem.com"},
+    {"+job-application -inbox", "from:mailer@codechem.com subject:\"New Contact Application\""},
+    {"+job-application -inbox", "from:mailer@halicea.com subject:\"New Job Application\""},
+    {"+contact -inbox", "to:contact@codechem.com"},
+    
     /* notifications / newsletters */
-    {"+linkedin", "from:linkedin.com"},
-    {"+linkedin +job-alert", "from:jobalerts-noreply@linkedin.com"},
-    {"+github", "from:github.com"},
-    {"+slack", "from:slack.com"},
-    {"+hetzner", "from:hetzner.com"},
+    {"+linkedin -inbox", "from:linkedin.com"},
+    {"+linkedin +job-alert -inbox", "from:jobalerts-noreply@linkedin.com"},
+    {"+github -inbox", "from:github.com"},
+    {"+slack -inbox", "from:slack.com"},
+    {"+bills +hetzner -inbox", "from:hetzner.com"},
     {"+quora -inbox", "from:quora.com"},
-    /* banking */
-    {"+bank +unibank", "from:unibank.com.mk"},
-    {"+bank +nlb", "from:nlb.mk or from:24x7.com.mk"},
+    
+    /* banking — never inbox, as the notmuch rules had it */
+    {"+bank -inbox", "from:unibank.com.mk"},
+    {"+bank -inbox", "from:nlb.mk or from:24x7.com.mk"},
+    {"+bank -inbox", "from:revolut.com"},
+    {"+bank -inbox", "from:paypal.com"},
+    {"+bank -inbox", "from:halkbank.mk"},
+    {"+bank -inbox", "from:deutsche-bank.de or (from:db.com and not from:chess-db.com)"},
+    {"+bank -inbox", "from:stb.com.mk"},
+    {"+bank -inbox", "from:kb.com.mk"},
 };
 const int ntagrules = LEN(tagrules);
