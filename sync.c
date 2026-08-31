@@ -73,13 +73,6 @@ static void addf(char *d, size_t cap, const char *fmt, ...) {
     va_end(ap);
 }
 
-static void expand(const char *path, char *dst, size_t cap) {
-    if (path[0] == '~')
-        snprintf(dst, cap, "%s%s", getenv("HOME"), path + 1);
-    else
-        snprintf(dst, cap, "%s", path);
-}
-
 /* same lock mbsync takes, so the two can never run on a folder at once */
 static int lockstate(const char *boxdir) {
     char path[4160];

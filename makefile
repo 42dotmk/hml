@@ -9,9 +9,10 @@ VERSION != git describe --tags --always --dirty 2>/dev/null || echo dev
 CFLAGS  = -std=c11 -pedantic -Wall -Wextra -O2 -D_POSIX_C_SOURCE=200809L \
           -Dtypeof=__typeof__ -DHML_VERSION='"$(VERSION)"' \
           -isystem vendor -pthread
-LDLIBS  = -lssl -lcrypto
+LDLIBS  = -lssl -lcrypto -lsqlite3
 BINDIR  = $(HOME)/.local/bin
-OBJ     = hml.o sync.o send.o imap.o state.o maildir.o
+OBJ     = hml.o sync.o send.o imap.o state.o maildir.o mime.o index.o \
+          query.o
 
 all: hml
 

@@ -43,11 +43,19 @@ typedef struct {
     int nchannels;
 } Account;
 
+typedef struct {
+    const char *folder; /* channel near name, e.g. "Sent" */
+    const char *tag;    /* tag every message with a file in it gets */
+} FolderTag;
+
 /* config.h */
 extern const Account accounts[];
 extern const int naccounts;
 extern const char *postrecv; /* shell hook after `hml recv`, "" = none */
 extern const char *postsend; /* shell hook after `hml send`, "" = none */
+extern const char *mailroot; /* the index lives at <mailroot>/.hml.db */
+extern const FolderTag foldertags[];
+extern const int nfoldertags;
 
 /* state.c - mbsync's on-disk sync state (.mbsyncstate), kept compatible so
  * mbsync and hml can be used interchangeably on the same store */
@@ -133,8 +141,34 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force);
 /* send.c - SMTP submission ("hml send", sendmail-compatible) */
 int sendmain(int argc, char **argv);
 
+/* mime.c - the searchable text of one RFC 822 message */
+typedef struct {
+    char *mid;     /* Message-ID without brackets; synthesized if absent */
+    char *subject; /* decoded to UTF-8 */
+    char *from;
+    char *to;     /* To, Cc and Bcc */
+    char *attach; /* attachment file names, space separated */
+    char *body;   /* text of every text part, HTML stripped, capped */
+    char **refs;  /* stb_ds array: In-Reply-To + References, unique */
+    long date;    /* epoch, 0 if unparsable */
+} Mail;
+
+int mailparse(const char *buf, size_t n, Mail *m);
+void mailfree(Mail *m);
+
+/* index.c - the search index ("hml new") */
+typedef struct sqlite3 sqlite3;
+sqlite3 *dbopen(char *err, size_t errlen);
+int newmain(int argc, char **argv);
+
+/* query.c - "hml search", "hml count", "hml tags" */
+int searchmain(int argc, char **argv);
+int countmain(int argc, char **argv);
+int tagsmain(int argc, char **argv);
+
 /* hml.c */
 void report(const char *label, const char *fmt, ...);
 char *runpasscmd(const char *cmd, char *err, size_t errlen);
+void expand(const char *path, char *dst, size_t cap); /* leading ~ */
 
 #endif

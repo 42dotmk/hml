@@ -58,6 +58,13 @@ char *runpasscmd(const char *cmd, char *err, size_t errlen) {
     return strdup(buf);
 }
 
+void expand(const char *path, char *dst, size_t cap) {
+    if (path[0] == '~')
+        snprintf(dst, cap, "%s%s", getenv("HOME"), path + 1);
+    else
+        snprintf(dst, cap, "%s", path);
+}
+
 static Imap *acctconnect(const Account *a, const char *pass, char *err,
                          size_t errlen) {
     Imap *im = imapconnect(a->host, a->port, err, errlen);
@@ -123,7 +130,12 @@ static int usage(int rc) {
           "  recv -n  dry run: list what recv would do\n"
           "  send     SMTP submission: hml send [-t] [-f from] [-a account]\n"
           "           [rcpt ...] < message\n"
-          "  search   not implemented yet\n"
+          "  new      update the search index from the maildirs (-d: full)\n"
+          "  search   query the index: hml search [--output=summary|threads|\n"
+          "           messages|files|tags] [--format=text|json] [--limit=N]\n"
+          "           [--sort=newest-first|oldest-first] <query>\n"
+          "  count    hml count [--output=messages|threads|files] <query>\n"
+          "  tags     hml tags [<query>]: every tag, or those of the matches\n"
           "  -d       distrust caches, verify with a full listing\n"
           "  -v       print version\n",
           stderr);
@@ -144,9 +156,14 @@ int main(int argc, char *argv[]) {
             i = 2;
         } else if (!strcmp(argv[1], "send")) {
             return sendmain(argc - 2, argv + 2);
+        } else if (!strcmp(argv[1], "new")) {
+            return newmain(argc - 2, argv + 2);
         } else if (!strcmp(argv[1], "search")) {
-            fputs("hml: search is not implemented yet\n", stderr);
-            return 2;
+            return searchmain(argc - 2, argv + 2);
+        } else if (!strcmp(argv[1], "count")) {
+            return countmain(argc - 2, argv + 2);
+        } else if (!strcmp(argv[1], "tags")) {
+            return tagsmain(argc - 2, argv + 2);
         } else {
             /* not a command: an account name filters the status report */
             for (k = 0; k < naccounts; k++)

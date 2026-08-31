@@ -35,3 +35,18 @@ const int naccounts = LEN(accounts);
  * status or -n dry runs) and after a successful `hml send`; "" = none */
 const char *postrecv = "notmuch new";
 const char *postsend = "";
+
+/* search index: <mailroot>/.hml.db, an hml-only cache that `hml new`
+ * rebuilds from scratch if deleted. Queries name boxes <account>/<near>,
+ * e.g. path:cc/Sent */
+const char *mailroot = "~/.mail";
+
+/* tags derived from folders: a message with a file in a listed folder
+ * carries that tag; a message in none of them is tag:inbox. Flag tags
+ * (unread, flagged, replied, draft, passed) come from the maildir flags. */
+const FolderTag foldertags[] = {
+    {"Sent", "sent"},
+    {"Drafts", "draft"},
+    {"Trash", "deleted"},
+};
+const int nfoldertags = LEN(foldertags);
