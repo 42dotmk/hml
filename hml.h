@@ -56,9 +56,11 @@ typedef struct {
 /* config.h */
 extern const Account accounts[];
 extern const int naccounts;
-extern const char *postrecv; /* shell hook after `hml recv`, "" = none */
-extern const char *postsend; /* shell hook after `hml send`, "" = none */
-extern const char *mailroot; /* the index lives at <mailroot>/.hml.db */
+extern const char *postrecv;    /* shell hook after `hml recv`, "" = none */
+extern const char *postsend;    /* shell hook after `hml send`, "" = none */
+extern const char *mailroot;    /* the index lives at <mailroot>/.hml.db */
+extern const char *localdomain; /* mail @here never leaves the machine */
+extern const char *localbox;    /* ...it lands in <localbox>/<localpart>/ */
 extern const FolderTag foldertags[];
 extern const int nfoldertags;
 extern const TagRule tagrules[];
@@ -116,6 +118,9 @@ int mdsetflags(const char *boxdir, const Local *m, unsigned flags, char *err,
 int mdassignuid(const char *boxdir, const Local *m, uint32_t nuid, char *err,
                 size_t errlen);
 int mddelete(const char *boxdir, const Local *m, char *err, size_t errlen);
+/* a locally delivered message: tmp/ -> new/, no uid, no flags */
+int mddeliver(const char *boxdir, const char *tmppath, char *err,
+              size_t errlen);
 
 /* imap.c */
 typedef struct Imap Imap;
@@ -162,8 +167,8 @@ size_t mimehdrs(const char *s, size_t n, Hdr **out);
 /* first header of that name, unfolded and trimmed, malloc'd; NULL if absent */
 char *mimehget(Hdr *h, const char *name);
 char *mimedecode(const char *v); /* RFC 2047 words -> UTF-8, malloc'd */
-void mimetype(const char *ct, char *out, size_t cap); /* "type/sub" lc */
-char *mimeparam(const char *v, const char *name);    /* ;name= value */
+void mimetype(const char *ct, char *out, size_t cap);    /* "type/sub" lc */
+char *mimeparam(const char *v, const char *name);        /* ;name= value */
 char *mimecte(const char *cte, const char *s, size_t n); /* stb array */
 void mimeutf8(char **out, const char *cs, const char *in, size_t n);
 void mimehtmltext(char **out, const char *s, size_t n);
@@ -224,5 +229,8 @@ int replymain(int argc, char **argv);
 void report(const char *label, const char *fmt, ...);
 char *runpasscmd(const char *cmd, char *err, size_t errlen);
 void expand(const char *path, char *dst, size_t cap); /* leading ~ */
+/* the maildir directory of a box the index names "acct/Sub" or
+ * "<localdomain>/<name>"; 0 when no configured account owns it */
+int boxroot(const char *box, char *out, size_t cap);
 
 #endif

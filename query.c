@@ -755,18 +755,11 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
  * 0 when the box belongs to an account that is no longer configured */
 int filepath(const char *box, const char *sub, const char *name, char *out,
              size_t cap) {
-    const char *slash = strchr(box, '/');
-    char root[4096];
-    int a;
+    char dir[4096];
 
-    for (a = 0; a < naccounts; a++)
-        if (slash && (size_t)(slash - box) == strlen(accounts[a].name) &&
-            !strncmp(box, accounts[a].name, (size_t)(slash - box)))
-            break;
-    if (a == naccounts)
+    if (!boxroot(box, dir, sizeof dir))
         return 0;
-    expand(accounts[a].maildir, root, sizeof root);
-    snprintf(out, cap, "%s/%s/%s/%s", root, slash + 1, sub, name);
+    snprintf(out, cap, "%s/%s/%s", dir, sub, name);
     return 1;
 }
 

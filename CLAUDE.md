@@ -154,6 +154,19 @@ also makes historical log lines naming them inert on replay, and
 shadow the files. `hml recv` then pushes the flag change like any local
 one (notmuch's `maildir.synchronize_flags`, without the option).
 
+Local delivery (send.c `deliverlocal`, maildir.c `mddeliver`): a
+recipient whose domain is `localdomain` (config.h, "hal") or
+`localhost` is written into the Maildir `<localbox>/<localpart>/`
+instead of going to SMTP — tmp/ then rename into new/, Bcc blocks
+skipped, CR stripped, `Date:`/`Message-ID:` synthesized when absent
+(one id shared by all local copies), a headerless body gets `To:` and
+the blank line. Mixed recipient lists deliver locally first, then
+submit the rest; an all-local list needs no account at all. `hml new`
+walks `<localbox>/*` as boxes named `<localdomain>/<name>` (`hml.c
+boxroot` resolves both account boxes and local ones; `filepath` and
+`mirrorflags` use it). This is hal's message bus (`main@hal` is the
+agent, `user@hal` the person); see hal's CLAUDE.md.
+
 Next: per-folder connection fan-out, COMPRESS=DEFLATE, IDLE daemon mode.
 
 ## Gmail quirks (learned the hard way, keep in mind)

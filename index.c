@@ -173,8 +173,8 @@ static void refine(sqlite3 *db) {
         sqlite3_prepare_v2(db,
                            "DELETE FROM tag WHERE msg=? AND name='attachment'",
                            -1, &untag, NULL);
-        sqlite3_prepare_v2(db, "UPDATE msg SET attach=1 WHERE id=?", -1,
-                           &mark, NULL);
+        sqlite3_prepare_v2(db, "UPDATE msg SET attach=1 WHERE id=?", -1, &mark,
+                           NULL);
         sqlite3_prepare_v2(db,
                            "INSERT OR IGNORE INTO tag(msg,name) VALUES"
                            "(?,'attachment')",
@@ -209,8 +209,9 @@ static void refine(sqlite3 *db) {
         sqlite3_finalize(untag);
         sqlite3_finalize(mark);
         sqlite3_finalize(tag);
-        fprintf(stderr, "hml: attachment tag: %ld candidates parsed, %ld"
-                        " marked, %ld un-marked\n",
+        fprintf(stderr,
+                "hml: attachment tag: %ld candidates parsed, %ld"
+                " marked, %ld un-marked\n",
                 total, added, dropped);
         hmfree(keep);
         hmfree(seen);
@@ -232,9 +233,9 @@ static void migrate(sqlite3 *db) {
         have = sqlite3_step(st) == SQLITE_ROW;
         sqlite3_finalize(st);
     }
-    if (have && sqlite3_prepare_v2(db,
-                                   "SELECT 1 FROM meta WHERE key='attachstrict'",
-                                   -1, &st, NULL) == SQLITE_OK) {
+    if (have &&
+        sqlite3_prepare_v2(db, "SELECT 1 FROM meta WHERE key='attachstrict'",
+                           -1, &st, NULL) == SQLITE_OK) {
         strict = sqlite3_step(st) == SQLITE_ROW;
         sqlite3_finalize(st);
     }
@@ -267,8 +268,9 @@ static void migrate(sqlite3 *db) {
               "(delete .hml.db*, run hml new)\n",
               stderr);
     refine(db);
-    sqlite3_exec(db, "INSERT OR REPLACE INTO meta(key,val) VALUES"
-                     "('attachstrict',1); COMMIT",
+    sqlite3_exec(db,
+                 "INSERT OR REPLACE INTO meta(key,val) VALUES"
+                 "('attachstrict',1); COMMIT",
                  NULL, NULL, NULL);
 }
 
@@ -356,7 +358,8 @@ static void prepall(Db *d) {
     d->utagset =
         prep(d, "INSERT OR REPLACE INTO utag(mid,name,val) VALUES(?,?,?)");
     d->utagdel = prep(d, "DELETE FROM utag WHERE mid=? AND name=?");
-    d->filesof = prep(d, "SELECT box,base,sub,name,flags FROM file WHERE msg=?");
+    d->filesof =
+        prep(d, "SELECT box,base,sub,name,flags FROM file WHERE msg=?");
     d->metaget = prep(d, "SELECT val FROM meta WHERE key=?");
     d->metaset = prep(d, "INSERT OR REPLACE INTO meta(key,val) VALUES(?,?)");
     d->insnew = prep(d, "INSERT OR IGNORE INTO newmsg(id) VALUES(?)");
@@ -528,23 +531,6 @@ static unsigned flagof(const char *name, int *inverted) {
     return 0;
 }
 
-/* the maildir directory of a box "acct/Sub"; 0 if the account is gone */
-static int boxdirof(const char *box, char *out, size_t cap) {
-    const char *slash = strchr(box, '/');
-    char root[4096];
-    int a;
-
-    for (a = 0; a < naccounts; a++)
-        if (slash && (size_t)(slash - box) == strlen(accounts[a].name) &&
-            !strncmp(box, accounts[a].name, (size_t)(slash - box)))
-            break;
-    if (a == naccounts)
-        return 0;
-    expand(accounts[a].maildir, root, sizeof root);
-    snprintf(out, cap, "%s/%s", root, slash + 1);
-    return 1;
-}
-
 /* apply the flag ops to every file of a message: rename in the maildir
  * (seen mail graduates new/ -> cur/), mirror the row, drop any stale
  * override of the same name, then recompute the tags */
@@ -581,7 +567,7 @@ static void mirrorflags(Db *d, sqlite3_int64 id, const char *mid,
             else
                 nf &= ~bit;
         }
-        if (nf == f || !boxdirof(rows[i].box, boxdir, sizeof boxdir))
+        if (nf == f || !boxroot(rows[i].box, boxdir, sizeof boxdir))
             continue;
         m.uid = 0;
         m.flags = f;
@@ -1194,6 +1180,24 @@ int newmain(int argc, char **argv) {
                      accounts[i].channels[k].near);
             scanbox(&d, &sc, strdup(box), strdup(boxdir), force);
         }
+    }
+    /* the local boxes: one directory per address under localbox */
+    expand(localbox, root, sizeof root);
+    {
+        char **names = NULL, cur[4200];
+        struct stat st;
+        if (listdir(root, &names) < 0 && errno != ENOENT)
+            fprintf(stderr, "hml new: %s: %s\n", root, strerror(errno));
+        for (i = 0; i < arrlen(names); i++) {
+            snprintf(boxdir, sizeof boxdir, "%s/%s", root, names[i]);
+            snprintf(cur, sizeof cur, "%s/cur", boxdir);
+            if (stat(cur, &st) == 0 && S_ISDIR(st.st_mode)) {
+                snprintf(box, sizeof box, "%s/%s", localdomain, names[i]);
+                scanbox(&d, &sc, strdup(box), strdup(boxdir), force);
+            }
+            free(names[i]);
+        }
+        arrfree(names);
     }
     exec(&d, "COMMIT");
     if (arrlen(sc.jobs)) {

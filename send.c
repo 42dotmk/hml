@@ -2,12 +2,15 @@
  * so MUAs configured for msmtp/sendmail work by swapping one path.
  * Reads the message on stdin; -t takes recipients from To/Cc/Bcc (and
  * strips Bcc before transmission); -f overrides the envelope sender;
- * -a picks the account, otherwise the From address selects it. */
+ * -a picks the account, otherwise the From address selects it.
+ * Recipients @localdomain never reach SMTP: the message is delivered
+ * into the maildir <localbox>/<localpart>/ on this machine. */
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <stb_ds.h>
@@ -184,8 +187,72 @@ static int fail(const char *what, const char *why) {
     return 1;
 }
 
+/* --- local delivery --- */
+
+static int islocal(const char *addr) {
+    const char *at = strrchr(addr, '@');
+
+    return at && (!strcasecmp(at + 1, localdomain) ||
+                  !strcasecmp(at + 1, "localhost"));
+}
+
+/* the message, Bcc blocks skipped and CR stripped, into the maildir of
+ * the local part; Date and Message-ID are added when missing, and a
+ * bare body (no header block at all) gets To: and the blank line */
+static int deliverlocal(const char *msg, size_t msglen, const Range *bcc,
+                        const char *addr, int hasdate, const char *mid,
+                        int hashdrs) {
+    const char *at = strrchr(addr, '@');
+    char err[256], root[4096], dir[4160], tmp[4160];
+    size_t n = (size_t)(at - addr), o = 0;
+    time_t now = time(NULL);
+    long bi = 0;
+    FILE *f;
+
+    if (n == 0 || n > 200 || addr[0] == '.' || memchr(addr, '/', n))
+        return fail(addr, "bad local part");
+    expand(localbox, root, sizeof root);
+    snprintf(dir, sizeof dir, "%s/%.*s", root, (int)n, addr);
+    if (mdensure(dir, err, sizeof err) < 0)
+        return fail(dir, err);
+    mdtmp(tmp, sizeof tmp, dir);
+    if (!(f = fopen(tmp, "w")))
+        return fail(tmp, "cannot create");
+    if (!hasdate) {
+        char d[64];
+        strftime(d, sizeof d, "%a, %d %b %Y %H:%M:%S %z", localtime(&now));
+        fprintf(f, "Date: %s\n", d);
+    }
+    if (mid)
+        fprintf(f, "Message-ID: %s\n", mid);
+    if (!hashdrs)
+        fprintf(f, "To: %s\n\n", addr);
+    while (o < msglen) {
+        const char *nl;
+        size_t le, l;
+        if (bi < arrlen(bcc) && o == bcc[bi].start) {
+            o = bcc[bi].end;
+            bi++;
+            continue;
+        }
+        nl = memchr(msg + o, '\n', msglen - o);
+        le = nl ? (size_t)(nl - msg) : msglen;
+        l = le - o;
+        if (l && msg[le - 1] == '\r')
+            l--;
+        fwrite(msg + o, 1, l, f);
+        fputc('\n', f);
+        o = nl ? le + 1 : msglen;
+    }
+    if (fclose(f) != 0 || mddeliver(dir, tmp, err, sizeof err) < 0) {
+        unlink(tmp);
+        return fail(dir, err[0] ? err : "write failed");
+    }
+    return 0;
+}
+
 int sendmain(int argc, char **argv) {
-    char err[256] = "", host[64], auth[600], authb64[820];
+    char err[256] = "", host[64], auth[600], authb64[820], mid[128];
     char *msg, *pass, *from = NULL;
     const char *acctname = NULL, *envfrom = NULL;
     char **rcpts = NULL;
@@ -194,7 +261,7 @@ int sendmain(int argc, char **argv) {
     Imap *im;
     size_t msglen, o;
     long i, bi = 0;
-    int tflag = 0, rc = 1;
+    int tflag = 0, rc = 1, hasdate = 0, hasmid = 0, hashdrs = 0;
 
     for (i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "-t")) {
@@ -224,8 +291,10 @@ int sendmain(int argc, char **argv) {
         const char *nl = memchr(msg + o, '\n', msglen - o);
         size_t ls = o, le = nl ? (size_t)(nl - msg) : msglen, be;
         const char *colon;
-        if (le - ls == 0 || (le - ls == 1 && msg[ls] == '\r'))
+        if (le - ls == 0 || (le - ls == 1 && msg[ls] == '\r')) {
+            hashdrs = 1;
             break; /* end of headers */
+        }
         be = nl ? le + 1 : msglen;
         while (be < msglen && (msg[be] == ' ' || msg[be] == '\t')) {
             const char *nl2 = memchr(msg + be, '\n', msglen - be);
@@ -235,6 +304,10 @@ int sendmain(int argc, char **argv) {
             size_t nlen = (size_t)(colon - (msg + ls));
             size_t vs = (size_t)(colon - msg) + 1;
             char *v;
+            if (nlen == 4 && !strncasecmp(msg + ls, "date", 4))
+                hasdate = 1;
+            else if (nlen == 10 && !strncasecmp(msg + ls, "message-id", 10))
+                hasmid = 1;
             if (nlen == 4 && !strncasecmp(msg + ls, "from", 4) && !from) {
                 char **one = NULL;
                 if ((v = hdrvalue(msg, vs, be))) {
@@ -269,6 +342,26 @@ int sendmain(int argc, char **argv) {
 
     if (!arrlen(rcpts)) {
         rc = fail("recipients", tflag ? "none found in headers" : "none given");
+        goto out;
+    }
+    /* local recipients first (no network to fail), then the rest by SMTP;
+     * one synthesized Message-ID is shared by every local copy */
+    if (!hasmid)
+        snprintf(mid, sizeof mid, "<%ld.%d@%s>", (long)time(NULL),
+                 (int)getpid(), localdomain);
+    for (i = 0; i < arrlen(rcpts);) {
+        if (!islocal(rcpts[i])) {
+            i++;
+            continue;
+        }
+        if (deliverlocal(msg, msglen, bccblk, rcpts[i], hasdate,
+                         hasmid ? NULL : mid, hashdrs) != 0)
+            goto out;
+        free(rcpts[i]);
+        arrdel(rcpts, i);
+    }
+    if (!arrlen(rcpts)) {
+        rc = 0;
         goto out;
     }
     if (!(a = pickaccount(acctname, from))) {

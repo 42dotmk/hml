@@ -208,6 +208,23 @@ against the configured accounts. AUTH PLAIN over implicit TLS
 no duplicate-Sent dance: the server files the sent copy into
 `[Gmail]/Sent Mail` itself and the next `recv` picks it up.
 
+### Local delivery
+
+A recipient `@hal` (the compiled-in `localdomain`; `@localhost` too)
+never goes out: `hml send` writes the message into the Maildir
+`~/.mail/hal/<localpart>/` on this machine, adding `Date:` and
+`Message-ID:` when missing, and `hml new` indexes those boxes as
+`hal/<localpart>`. No account is needed, so it works on a fresh hos
+before any mail is set up. A message with both local and remote
+recipients is delivered locally first, then submitted. This is hal's
+message bus: `main@hal` is the agent, `user@hal` is you.
+
+```sh
+printf 'Subject: check the build\n\nhwm fails to link.\n' | hml send main@hal
+hml search to:user@hal tag:unread     # what hal left for you
+hml show -- path:hal/main/**          # everything the agent was told
+```
+
 ## Configuration
 
 Suckless-style: the config is a C table compiled into the binary. Edit
@@ -240,6 +257,8 @@ const int naccounts = LEN(accounts);
 /* shell hooks; "" = do nothing */
 const char *postrecv = "hml new";     /* after every `hml recv` */
 const char *postsend = "";            /* after a successful `hml send` */
+const char *localdomain = "hal";      /* recipients @here stay on disk */
+const char *localbox = "~/.mail/hal"; /* ...in <localbox>/<localpart>/ */
 
 /* search index location, folder-derived tags, tag rules */
 const char *mailroot = "~/.mail";     /* index at <mailroot>/.hml.db */

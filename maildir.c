@@ -206,3 +206,16 @@ int mddelete(const char *boxdir, const Local *m, char *err, size_t errlen) {
     }
     return 0;
 }
+
+int mddeliver(const char *boxdir, const char *tmppath, char *err,
+              size_t errlen) {
+    char path[4160];
+
+    snprintf(path, sizeof path, "%s/new/%ld.%d_%d.%s:2,", boxdir,
+             (long)time(NULL), (int)getpid(), nextseq(), shorthost());
+    if (rename(tmppath, path) < 0) {
+        snprintf(err, errlen, "rename into %s: %s", path, strerror(errno));
+        return -1;
+    }
+    return 0;
+}

@@ -65,6 +65,30 @@ void expand(const char *path, char *dst, size_t cap) {
         snprintf(dst, cap, "%s", path);
 }
 
+int boxroot(const char *box, char *out, size_t cap) {
+    const char *slash = strchr(box, '/');
+    char root[4096];
+    size_t n;
+    int a;
+
+    if (!slash)
+        return 0;
+    n = (size_t)(slash - box);
+    for (a = 0; a < naccounts; a++)
+        if (n == strlen(accounts[a].name) &&
+            !strncmp(box, accounts[a].name, n)) {
+            expand(accounts[a].maildir, root, sizeof root);
+            snprintf(out, cap, "%s/%s", root, slash + 1);
+            return 1;
+        }
+    if (n == strlen(localdomain) && !strncmp(box, localdomain, n)) {
+        expand(localbox, root, sizeof root);
+        snprintf(out, cap, "%s/%s", root, slash + 1);
+        return 1;
+    }
+    return 0;
+}
+
 static Imap *acctconnect(const Account *a, const char *pass, char *err,
                          size_t errlen) {
     Imap *im = imapconnect(a->host, a->port, err, errlen);
