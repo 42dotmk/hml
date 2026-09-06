@@ -34,7 +34,7 @@ const int naccounts = LEN(accounts);
 /* shell commands run once after `hml recv` (all accounts done; not on
  * status or -n dry runs) and after a successful `hml send`; "" = none */
 const char *postrecv = "hml new";
-const char *postsend = "";
+const char *postsend = "hml new"; /* local delivery searchable at once */
 
 /* local delivery: `hml send` puts mail for anyone @localdomain (or
  * @localhost) into the maildir <localbox>/<localpart>/ instead of
@@ -66,6 +66,7 @@ const TagRule tagrules[] = {
     /* hal's message bus: what hal is told stays out of my inbox view,
      * what it leaves for me (to:user@hal) stays in */
     {"+hal -inbox", "to:main@hal"},
+    {"+hal -inbox", "path:hal/s/**"},
 
     /* codechem forms */
     {"+job-application -inbox",

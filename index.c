@@ -32,7 +32,7 @@ static const char *schema =
     "CREATE TABLE IF NOT EXISTS msg(id INTEGER PRIMARY KEY,"
     " mid TEXT NOT NULL UNIQUE, thread INTEGER NOT NULL, date INTEGER NOT NULL,"
     " subject TEXT NOT NULL, sender TEXT NOT NULL,"
-    " attach INTEGER NOT NULL DEFAULT 0);"
+    " attach INTEGER NOT NULL DEFAULT 0, intent TEXT NOT NULL DEFAULT '');"
     "CREATE INDEX IF NOT EXISTS msg_thread ON msg(thread);"
     "CREATE INDEX IF NOT EXISTS msg_date ON msg(date);"
     "CREATE TABLE IF NOT EXISTS file(box TEXT NOT NULL, base TEXT NOT NULL,"
@@ -219,6 +219,26 @@ static void refine(sqlite3 *db) {
     arrfree(refine_q.c);
 }
 
+/* msg.intent (hal's session messages) arrived later too; no backfill:
+ * the boxes that carry it did not exist before the column */
+static void ensureintent(sqlite3 *db) {
+    sqlite3_stmt *st;
+    int have = 0;
+
+    if (sqlite3_prepare_v2(db,
+                           "SELECT 1 FROM pragma_table_info('msg')"
+                           " WHERE name='intent'",
+                           -1, &st, NULL) == SQLITE_OK) {
+        have = sqlite3_step(st) == SQLITE_ROW;
+        sqlite3_finalize(st);
+    }
+    if (!have)
+        sqlite3_exec(db,
+                     "ALTER TABLE msg ADD COLUMN intent TEXT NOT NULL"
+                     " DEFAULT ''",
+                     NULL, NULL, NULL);
+}
+
 static void migrate(sqlite3 *db) {
     sqlite3_stmt *st;
     char q[4096] = "UPDATE msg SET attach=1 WHERE id IN (SELECT rowid FROM fts"
@@ -295,6 +315,7 @@ sqlite3 *dbopen(char *err, size_t errlen) {
         return NULL;
     }
     migrate(db);
+    ensureintent(db);
     return db;
 }
 
@@ -306,7 +327,7 @@ typedef struct {
         *insref, *delref, *insfile, *mvfile, *delfile, *filemsg, *nfiles,
         *delmsg, *deltag, *instag, *msgfiles, *boxfiles, *dirget, *dirset,
         *midof, *utagget, *utagset, *utagdel, *filesof, *attachof, *setattach,
-        *metaget, *metaset, *insnew;
+        *intentof, *metaget, *metaset, *insnew;
     long added, moved, removed, newmsgs;
 } Db;
 
@@ -328,8 +349,9 @@ static sqlite3_stmt *prep(Db *d, const char *sql) {
 static void prepall(Db *d) {
     d->msgbymid = prep(d, "SELECT id FROM msg WHERE mid=?");
     d->insmsg = prep(d, "INSERT INTO msg(mid,thread,date,subject,sender,"
-                        "attach) VALUES(?,?,?,?,?,?)");
+                        "attach,intent) VALUES(?,?,?,?,?,?,?)");
     d->attachof = prep(d, "SELECT attach FROM msg WHERE id=?");
+    d->intentof = prep(d, "SELECT intent FROM msg WHERE id=?");
     d->setattach = prep(d, "UPDATE msg SET attach=1 WHERE id=? AND attach=0");
     d->setthread = prep(d, "UPDATE msg SET thread=? WHERE id=?");
     d->merge = prep(d, "UPDATE msg SET thread=? WHERE thread=?");
@@ -439,6 +461,17 @@ static void retag(Db *d, sqlite3_int64 id) {
     if (step1(d, d->attachof) > 0)
         tags[nt++] = strdup("attachment");
     sqlite3_reset(d->attachof);
+    /* a hal session message: hal:<intent>, so the plumbing can be hidden */
+    sqlite3_bind_int64(d->intentof, 1, id);
+    if (sqlite3_step(d->intentof) == SQLITE_ROW) {
+        const char *in = (const char *)sqlite3_column_text(d->intentof, 0);
+        if (in && *in && nt < 30) {
+            char t[64];
+            snprintf(t, sizeof t, "hal:%.50s", in);
+            tags[nt++] = strdup(t);
+        }
+    }
+    sqlite3_reset(d->intentof);
     /* overrides: +tag adds, -tag removes, latest write per name wins */
     sqlite3_bind_int64(d->midof, 1, id);
     if (sqlite3_step(d->midof) == SQLITE_ROW)
@@ -849,6 +882,7 @@ static void addfile(Db *d, const Job *j, const Mail *m) {
         bindtext(d->insmsg, 4, m->subject);
         bindtext(d->insmsg, 5, m->from);
         sqlite3_bind_int(d->insmsg, 6, m->hasatt);
+        bindtext(d->insmsg, 7, m->intent ? m->intent : "");
         step1(d, d->insmsg);
         id = sqlite3_last_insert_rowid(d->db);
         if (!thread) {
@@ -1146,6 +1180,36 @@ static void index_(Db *d, Scan *sc) {
         pthread_join(tid[i], NULL);
 }
 
+static void scanlocal(Db *d, Scan *sc, const char *root, const char *rel,
+                      int depth, int force) {
+    char dir[4200], sub[4200], cur[4300], box[512], **names = NULL;
+    struct stat st;
+    ptrdiff_t i;
+
+    snprintf(dir, sizeof dir, "%s%s%s", root, *rel ? "/" : "", rel);
+    if (listdir(dir, &names) < 0) {
+        if (errno != ENOENT)
+            fprintf(stderr, "hml new: %s: %s\n", dir, strerror(errno));
+        return;
+    }
+    for (i = 0; i < arrlen(names); i++) {
+        if (strcmp(names[i], "cur") && strcmp(names[i], "new") &&
+            strcmp(names[i], "tmp")) {
+            snprintf(sub, sizeof sub, "%s%s%s", rel, *rel ? "/" : "", names[i]);
+            snprintf(cur, sizeof cur, "%s/%s/cur", root, sub);
+            if (stat(cur, &st) == 0 && S_ISDIR(st.st_mode)) {
+                snprintf(box, sizeof box, "%s/%.400s", localdomain, sub);
+                snprintf(cur, sizeof cur, "%s/%s", root, sub);
+                scanbox(d, sc, strdup(box), strdup(cur), force);
+            }
+            if (depth < 2)
+                scanlocal(d, sc, root, sub, depth + 1, force);
+        }
+        free(names[i]);
+    }
+    arrfree(names);
+}
+
 int newmain(int argc, char **argv) {
     Db d;
     Scan sc = {NULL, NULL, 0};
@@ -1181,24 +1245,10 @@ int newmain(int argc, char **argv) {
             scanbox(&d, &sc, strdup(box), strdup(boxdir), force);
         }
     }
-    /* the local boxes: one directory per address under localbox */
+    /* the local boxes: every maildir under localbox, up to three deep
+     * (hal/main, hal/s/<session>), named by their relative path */
     expand(localbox, root, sizeof root);
-    {
-        char **names = NULL, cur[4200];
-        struct stat st;
-        if (listdir(root, &names) < 0 && errno != ENOENT)
-            fprintf(stderr, "hml new: %s: %s\n", root, strerror(errno));
-        for (i = 0; i < arrlen(names); i++) {
-            snprintf(boxdir, sizeof boxdir, "%s/%s", root, names[i]);
-            snprintf(cur, sizeof cur, "%s/cur", boxdir);
-            if (stat(cur, &st) == 0 && S_ISDIR(st.st_mode)) {
-                snprintf(box, sizeof box, "%s/%s", localdomain, names[i]);
-                scanbox(&d, &sc, strdup(box), strdup(boxdir), force);
-            }
-            free(names[i]);
-        }
-        arrfree(names);
-    }
+    scanlocal(&d, &sc, root, "", 0, force);
     exec(&d, "COMMIT");
     if (arrlen(sc.jobs)) {
         exec(&d, "BEGIN IMMEDIATE");

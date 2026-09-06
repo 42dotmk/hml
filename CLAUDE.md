@@ -162,10 +162,19 @@ skipped, CR stripped, `Date:`/`Message-ID:` synthesized when absent
 (one id shared by all local copies), a headerless body gets `To:` and
 the blank line. Mixed recipient lists deliver locally first, then
 submit the rest; an all-local list needs no account at all. `hml new`
-walks `<localbox>/*` as boxes named `<localdomain>/<name>` (`hml.c
-boxroot` resolves both account boxes and local ones; `filepath` and
-`mirrorflags` use it). This is hal's message bus (`main@hal` is the
-agent, `user@hal` the person); see hal's CLAUDE.md.
+walks `<localbox>` recursively, up to three deep (`scanlocal`), every
+directory with a `cur/` being a box named by its relative path
+(`hal/main`, `hal/s/<session>`); `hml.c boxroot` resolves both account
+boxes and local ones (`filepath` and `mirrorflags` use it). This is
+hal's message bus and conversation store (`main@hal` is the agent,
+`user@hal` the person, `hal/s/<id>` one conversation each; the format
+is hal's `MAIL.md`). `mailparse` reads `Hal-Intent` into `msg.intent`
+(a column added by `ensureintent`, no backfill) and `retag` derives the
+tag `hal:<intent>` from it, so `not tag:hal:tool-call` is the human
+view of a session. `hml show --entire-thread` expands the hits to every
+message of their threads in date order (one extra subquery in
+`showmain`). `postsend` is `hml new`, so local delivery is searchable
+at once (the mtime gate keeps it at milliseconds).
 
 Next: per-folder connection fan-out, COMPRESS=DEFLATE, IDLE daemon mode.
 

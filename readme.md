@@ -222,8 +222,13 @@ message bus: `main@hal` is the agent, `user@hal` is you.
 ```sh
 printf 'Subject: check the build\n\nhwm fails to link.\n' | hml send main@hal
 hml search to:user@hal tag:unread     # what hal left for you
-hml show -- path:hal/main/**          # everything the agent was told
+hml search path:hal/s/**              # hal's conversations, one folder each
+hml show --entire-thread thread:ID    # one of them, in order
 ```
+
+hal keeps its conversations in this tree too (`hal/s/<id>`, one
+message file per turn, `Hal-*` headers, `hal:<intent>` tags), so
+`hml reply` to anything hal sent continues that conversation.
 
 ## Configuration
 

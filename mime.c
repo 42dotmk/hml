@@ -350,7 +350,8 @@ static char *pdecode(char **raw, const char *p, size_t n, int first) {
     char *cs = NULL;
     const char *q, *r, *end = p + n;
 
-    if (first && (q = memchr(p, '\'', n)) && (r = memchr(q + 1, '\'', (size_t)(end - q - 1)))) {
+    if (first && (q = memchr(p, '\'', n)) &&
+        (r = memchr(q + 1, '\'', (size_t)(end - q - 1)))) {
         cs = malloc((size_t)(q - p) + 1);
         memcpy(cs, p, (size_t)(q - p));
         cs[q - p] = '\0';
@@ -654,10 +655,10 @@ static void walk(Ctx *c, const char *s, size_t n) {
         int sig = !strcmp(type, "application/pkcs7-signature") ||
                   !strcmp(type, "application/x-pkcs7-signature") ||
                   !strcmp(type, "application/pgp-signature");
-        if (!sig && ((cd && !strncasecmp(cd, "attachment", 10)) ||
-                     (fn && !cid && strncmp(type, "multipart/", 10) &&
-                      strcmp(type, "message/rfc822") &&
-                      strncmp(type, "text/", 5))))
+        if (!sig &&
+            ((cd && !strncasecmp(cd, "attachment", 10)) ||
+             (fn && !cid && strncmp(type, "multipart/", 10) &&
+              strcmp(type, "message/rfc822") && strncmp(type, "text/", 5))))
             c->hasatt = 1;
         free(cid);
     }
@@ -770,6 +771,7 @@ int mailparse(const char *buf, size_t n, Mail *m) {
     }
     utf8fix(m->mid);
     m->subject = hdrtext(h, "Subject");
+    m->intent = hdrtext(h, "Hal-Intent");
     m->from = hdrtext(h, "From");
     m->to = hdrtext(h, "To");
     for (i = 0; i < 2; i++) { /* To, Cc and Bcc all count as recipients */
@@ -813,6 +815,7 @@ void mailfree(Mail *m) {
     free(m->from);
     free(m->to);
     free(m->attach);
+    free(m->intent);
     free(m->body);
     for (i = 0; i < arrlen(m->refs); i++)
         free(m->refs[i]);
@@ -822,10 +825,14 @@ void mailfree(Mail *m) {
 
 /* --- exported primitives (show.c) --------------------------------------- */
 
-size_t mimehdrs(const char *s, size_t n, Hdr **out) { return headers(s, n, out); }
+size_t mimehdrs(const char *s, size_t n, Hdr **out) {
+    return headers(s, n, out);
+}
 char *mimehget(Hdr *h, const char *name) { return hget(h, name); }
 char *mimedecode(const char *v) { return hdrdecode(v); }
-void mimetype(const char *ct, char *out, size_t cap) { mediatype(ct, out, cap); }
+void mimetype(const char *ct, char *out, size_t cap) {
+    mediatype(ct, out, cap);
+}
 char *mimeparam(const char *v, const char *name) { return param(v, name); }
 char *mimecte(const char *cte, const char *s, size_t n) {
     return ctedecode(cte, s, n);

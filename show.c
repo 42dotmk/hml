@@ -53,8 +53,9 @@ static Hit *hits(sqlite3 *db, const Query *c, int newest, char **err) {
                          "SELECT msg.id,msg.mid,msg.date,file.box,file.sub,"
                          "file.name FROM msg JOIN file ON file.msg=msg.id"
                          " WHERE (%s)",
-                         c, newest ? " ORDER BY msg.date DESC,msg.id DESC"
-                                   : " ORDER BY msg.date,msg.id",
+                         c,
+                         newest ? " ORDER BY msg.date DESC,msg.id DESC"
+                                : " ORDER BY msg.date,msg.id",
                          err)))
         return NULL;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
@@ -121,10 +122,10 @@ enum { WShow, WRaw, WText };
 
 typedef struct {
     int mode;
-    int html;    /* show: include text/html bodies */
-    int want;    /* raw: the part id to extract */
+    int html; /* show: include text/html bodies */
+    int want; /* raw: the part id to extract */
     int found;
-    int next;    /* next part id */
+    int next; /* next part id */
     int depth;
     char *plain; /* text: stb arrays */
     char *htmltext;
@@ -186,8 +187,7 @@ static void showheaders(Hdr *h, long date, const char *tags) {
 }
 
 /* decoded text of a text part body, UTF-8 */
-static char *textof(const char *ct, const char *cte, const char *s,
-                    size_t n) {
+static char *textof(const char *ct, const char *cte, const char *s, size_t n) {
     char *dec = mimecte(cte, s, n), *cs = ct ? mimeparam(ct, "charset") : NULL,
          *u = NULL;
 
@@ -274,8 +274,8 @@ static void walk(Walk *w, const char *s, size_t n) {
         }
     } else if (isatt) {
         char *dn = mimedecode(fn ? fn : "");
-        printf("\fattachment{ ID: %d, Filename: %s, Content-type: %s\n", id,
-               dn, type);
+        printf("\fattachment{ ID: %d, Filename: %s, Content-type: %s\n", id, dn,
+               type);
         printf("Non-text part: %s\n", type);
         puts("\fattachment}");
         free(dn);
@@ -333,8 +333,8 @@ static char *msgtags(sqlite3 *db, sqlite3_int64 id) {
     sqlite3_stmt *st;
     char *out = NULL;
 
-    sqlite3_prepare_v2(db, "SELECT name FROM tag WHERE msg=? ORDER BY name",
-                       -1, &st, NULL);
+    sqlite3_prepare_v2(db, "SELECT name FROM tag WHERE msg=? ORDER BY name", -1,
+                       &st, NULL);
     sqlite3_bind_int64(st, 1, id);
     while (sqlite3_step(st) == SQLITE_ROW) {
         if (out)
@@ -454,7 +454,17 @@ int showmain(int argc, char **argv) {
         queryfree(&c);
         return fail("show", strdup(dberr));
     }
-    hs = hits(db, &c, 0, &err);
+    if (o.entire) { /* every message of every thread that has a hit */
+        Query t = {NULL, NULL, NULL};
+        sadd(&t.sql, "msg.thread IN (SELECT thread FROM msg WHERE (");
+        sadd(&t.sql, c.sql);
+        sadd(&t.sql, "))");
+        arrput(t.sql, '\0');
+        t.params = c.params;
+        hs = hits(db, &t, 0, &err);
+        arrfree(t.sql);
+    } else
+        hs = hits(db, &c, 0, &err);
     queryfree(&c);
     if (err) {
         sqlite3_close(db);
@@ -632,8 +642,8 @@ int replymain(int argc, char **argv) {
     Hit *hs;
     Hdr *h = NULL;
     Walk w = {WText, 0, 0, 0, 1, 0, NULL, NULL};
-    char *q, *err = NULL, dberr[256], *buf, *v, *from, *subject, *date,
-        *mid, *me = NULL, **to = NULL, **cc = NULL, **orig, **l, *text;
+    char *q, *err = NULL, dberr[256], *buf, *v, *from, *subject, *date, *mid,
+             *me = NULL, **to = NULL, **cc = NULL, **orig, **l, *text;
     const char *acct = NULL, *p;
     size_t n;
     ptrdiff_t i;
@@ -707,8 +717,7 @@ int replymain(int argc, char **argv) {
     freelist(l);
     if (all) {
         for (i = 0; i < arrlen(orig); i++)
-            if (!isown(orig[i]) && !inlist(to, orig[i]) &&
-                !inlist(cc, orig[i]))
+            if (!isown(orig[i]) && !inlist(to, orig[i]) && !inlist(cc, orig[i]))
                 arrput(cc, strdup(orig[i]));
     }
     freelist(orig);
