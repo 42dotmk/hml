@@ -771,7 +771,7 @@ int mailparse(const char *buf, size_t n, Mail *m) {
     }
     utf8fix(m->mid);
     m->subject = hdrtext(h, "Subject");
-    m->intent = hdrtext(h, "Hal-Intent");
+    m->intent = hdrtext(h, "Hai-Intent");
     m->from = hdrtext(h, "From");
     m->to = hdrtext(h, "To");
     for (i = 0; i < 2; i++) { /* To, Cc and Bcc all count as recipients */

@@ -39,10 +39,10 @@ const char *postsend = "hml new"; /* local delivery searchable at once */
 /* local delivery: `hml send` puts mail for anyone @localdomain (or
  * @localhost) into the maildir <localbox>/<localpart>/ instead of
  * handing it to SMTP; no account is needed. `hml new` indexes those
- * boxes as <localdomain>/<localpart> (path:hal/main). hal's sessions
- * and the user's own hal inbox live here. */
-const char *localdomain = "hal";
-const char *localbox = "~/.mail/hal";
+ * boxes as <localdomain>/<localpart> (path:hai/main). hai's sessions
+ * and the user's own hai inbox live here. */
+const char *localdomain = "hai";
+const char *localbox = "~/.mail/hai";
 
 /* search index: <mailroot>/.hml.db, an hml-only cache that `hml new`
  * rebuilds from scratch if deleted. Queries name boxes <account>/<near>,
@@ -63,13 +63,13 @@ const int nfoldertags = LEN(foldertags);
  * that match the query. Manual `hml tag` edits (kept in
  * <mailroot>/.htags, replayed on rebuild) always win over rules. */
 const TagRule tagrules[] = {
-    /* hal's message bus: every agent's conversation is tag:hal; the
+    /* hai's message bus: every agent's conversation is tag:hai; the
      * turns (what was said and asked, by anyone, in any agent's
      * session) stay in the inbox view, the plumbing (system prompts,
      * tool calls and results, summaries) stays out */
-    {"+hal", "path:hal/**"},
-    {"-inbox", "path:hal/** and not (tag:hal:message or tag:hal:ask or "
-               "tag:hal:answer)"},
+    {"+hai", "path:hai/**"},
+    {"-inbox", "path:hai/** and not (tag:hai:message or tag:hai:ask or "
+               "tag:hai:answer)"},
 
     /* codechem forms */
     {"+job-application -inbox",

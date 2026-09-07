@@ -219,7 +219,7 @@ static void refine(sqlite3 *db) {
     arrfree(refine_q.c);
 }
 
-/* msg.intent (hal's session messages) arrived later too; no backfill:
+/* msg.intent (hai's session messages) arrived later too; no backfill:
  * the boxes that carry it did not exist before the column */
 static void ensureintent(sqlite3 *db) {
     sqlite3_stmt *st;
@@ -461,13 +461,13 @@ static void retag(Db *d, sqlite3_int64 id) {
     if (step1(d, d->attachof) > 0)
         tags[nt++] = strdup("attachment");
     sqlite3_reset(d->attachof);
-    /* a hal session message: hal:<intent>, so the plumbing can be hidden */
+    /* a hai session message: hai:<intent>, so the plumbing can be hidden */
     sqlite3_bind_int64(d->intentof, 1, id);
     if (sqlite3_step(d->intentof) == SQLITE_ROW) {
         const char *in = (const char *)sqlite3_column_text(d->intentof, 0);
         if (in && *in && nt < 30) {
             char t[64];
-            snprintf(t, sizeof t, "hal:%.50s", in);
+            snprintf(t, sizeof t, "hai:%.50s", in);
             tags[nt++] = strdup(t);
         }
     }
@@ -958,7 +958,8 @@ typedef struct {
 
 typedef struct {
     Job *jobs;
-    Dir *dirs; /* mtimes to record once every job is in */
+    Dir *dirs;    /* mtimes to record once every job is in */
+    char **boxes; /* every box the scan visited, for prunegone */
     long now;
 } Scan;
 
@@ -989,6 +990,7 @@ static void scanbox(Db *d, Scan *sc, const char *box, const char *boxdir,
     Known *known = NULL;
     Known *kn;
 
+    arrput(sc->boxes, (char *)box);
     for (k = 0; k < 2; k++) {
         snprintf(path, sizeof path, "%s/%s", boxdir, subs[k]);
         snprintf(dirkey, sizeof dirkey, "%s/%s", box, subs[k]);
@@ -1210,9 +1212,57 @@ static void scanlocal(Db *d, Scan *sc, const char *root, const char *rel,
     arrfree(names);
 }
 
+/* a box whose maildir is gone (renamed, deleted) is never visited by
+ * scanbox, so its rows would outlive it: drop every file of every box the
+ * scan did not see, and the dir mtimes that would hide it on a rebuild */
+static void prunegone(Db *d, Scan *sc) {
+    sqlite3_stmt *boxes = prep(d, "SELECT DISTINCT box FROM file");
+    sqlite3_stmt *dirdel = prep(d, "DELETE FROM dir WHERE path=? OR path=?");
+    char **gone = NULL, key[2][256];
+    ptrdiff_t i, j;
+    int rc;
+
+    while ((rc = sqlite3_step(boxes)) == SQLITE_ROW) {
+        const char *box = (const char *)sqlite3_column_text(boxes, 0);
+        for (i = 0; i < arrlen(sc->boxes) && strcmp(sc->boxes[i], box); i++)
+            ;
+        if (i == arrlen(sc->boxes))
+            arrput(gone, strdup(box));
+    }
+    if (rc != SQLITE_DONE)
+        die(d, "boxes");
+    sqlite3_finalize(boxes);
+    for (j = 0; j < arrlen(gone); j++) {
+        Known *known = NULL;
+        bindtext(d->boxfiles, 1, gone[j]);
+        while ((rc = sqlite3_step(d->boxfiles)) == SQLITE_ROW) {
+            Known e = {NULL, NULL, NULL, NULL, 0, 0};
+            e.key = strdup((const char *)sqlite3_column_text(d->boxfiles, 0));
+            e.msg = sqlite3_column_int64(d->boxfiles, 4);
+            arrput(known, e);
+        }
+        if (rc != SQLITE_DONE)
+            die(d, "boxfiles");
+        sqlite3_reset(d->boxfiles);
+        for (i = 0; i < arrlen(known); i++) {
+            dropfile(d, gone[j], known[i].key, known[i].msg);
+            free(known[i].key);
+        }
+        arrfree(known);
+        snprintf(key[0], sizeof key[0], "%s/cur", gone[j]);
+        snprintf(key[1], sizeof key[1], "%s/new", gone[j]);
+        bindtext(dirdel, 1, key[0]);
+        bindtext(dirdel, 2, key[1]);
+        step1(d, dirdel);
+        free(gone[j]);
+    }
+    arrfree(gone);
+    sqlite3_finalize(dirdel);
+}
+
 int newmain(int argc, char **argv) {
     Db d;
-    Scan sc = {NULL, NULL, 0};
+    Scan sc = {NULL, NULL, NULL, 0};
     char err[256], root[4096], boxdir[4160], box[256];
     struct timespec t0, t1;
     int i, k, force = 0;
@@ -1246,9 +1296,10 @@ int newmain(int argc, char **argv) {
         }
     }
     /* the local boxes: every maildir under localbox, up to three deep
-     * (hal/main, hal/s/<session>), named by their relative path */
+     * (hai/main, hai/s/<session>), named by their relative path */
     expand(localbox, root, sizeof root);
     scanlocal(&d, &sc, root, "", 0, force);
+    prunegone(&d, &sc);
     exec(&d, "COMMIT");
     if (arrlen(sc.jobs)) {
         exec(&d, "BEGIN IMMEDIATE");

@@ -183,7 +183,7 @@ typedef struct {
     char *body;   /* text of every text part, HTML stripped, capped */
     char **refs;  /* stb_ds array: In-Reply-To + References, unique */
     long date;    /* epoch, 0 if unparsable */
-    char *intent; /* Hal-Intent, "" when absent: a hal session message */
+    char *intent; /* Hai-Intent, "" when absent: a hai session message */
     int hasatt;   /* carries a real attachment: a part with disposition
                      attachment, or a named non-text part that is not a
                      Content-ID image referenced from the HTML */

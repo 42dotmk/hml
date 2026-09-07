@@ -210,25 +210,25 @@ no duplicate-Sent dance: the server files the sent copy into
 
 ### Local delivery
 
-A recipient `@hal` (the compiled-in `localdomain`; `@localhost` too)
+A recipient `@hai` (the compiled-in `localdomain`; `@localhost` too)
 never goes out: `hml send` writes the message into the Maildir
-`~/.mail/hal/<localpart>/` on this machine, adding `Date:` and
+`~/.mail/hai/<localpart>/` on this machine, adding `Date:` and
 `Message-ID:` when missing, and `hml new` indexes those boxes as
-`hal/<localpart>`. No account is needed, so it works on a fresh hos
+`hai/<localpart>`. No account is needed, so it works on a fresh hos
 before any mail is set up. A message with both local and remote
-recipients is delivered locally first, then submitted. This is hal's
-message bus: `main@hal` is the agent, `user@hal` is you.
+recipients is delivered locally first, then submitted. This is hai's
+message bus: `main@hai` is the agent, `user@hai` is you.
 
 ```sh
-printf 'Subject: check the build\n\nhwm fails to link.\n' | hml send main@hal
-hml search to:user@hal tag:unread     # what hal left for you
-hml search path:hal/s/**              # hal's conversations, one folder each
+printf 'Subject: check the build\n\nhwm fails to link.\n' | hml send main@hai
+hml search to:user@hai tag:unread     # what hai left for you
+hml search path:hai/s/**              # hai's conversations, one folder each
 hml show --entire-thread thread:ID    # one of them, in order
 ```
 
-hal keeps its conversations in this tree too (`hal/s/<id>`, one
-message file per turn, `Hal-*` headers, `hal:<intent>` tags), so
-`hml reply` to anything hal sent continues that conversation.
+hai keeps its conversations in this tree too (`hai/s/<id>`, one
+message file per turn, `Hai-*` headers, `hai:<intent>` tags), so
+`hml reply` to anything hai sent continues that conversation.
 
 ## Configuration
 
@@ -262,8 +262,8 @@ const int naccounts = LEN(accounts);
 /* shell hooks; "" = do nothing */
 const char *postrecv = "hml new";     /* after every `hml recv` */
 const char *postsend = "";            /* after a successful `hml send` */
-const char *localdomain = "hal";      /* recipients @here stay on disk */
-const char *localbox = "~/.mail/hal"; /* ...in <localbox>/<localpart>/ */
+const char *localdomain = "hai";      /* recipients @here stay on disk */
+const char *localbox = "~/.mail/hai"; /* ...in <localbox>/<localpart>/ */
 
 /* search index location, folder-derived tags, tag rules */
 const char *mailroot = "~/.mail";     /* index at <mailroot>/.hml.db */
