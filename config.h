@@ -63,10 +63,13 @@ const int nfoldertags = LEN(foldertags);
  * that match the query. Manual `hml tag` edits (kept in
  * <mailroot>/.htags, replayed on rebuild) always win over rules. */
 const TagRule tagrules[] = {
-    /* hal's message bus: what hal is told stays out of my inbox view,
-     * what it leaves for me (to:user@hal) stays in */
-    {"+hal -inbox", "to:main@hal"},
-    {"+hal -inbox", "path:hal/s/**"},
+    /* hal's message bus: every agent's conversation is tag:hal; the
+     * turns (what was said and asked, by anyone, in any agent's
+     * session) stay in the inbox view, the plumbing (system prompts,
+     * tool calls and results, summaries) stays out */
+    {"+hal", "path:hal/**"},
+    {"-inbox", "path:hal/** and not (tag:hal:message or tag:hal:ask or "
+               "tag:hal:answer)"},
 
     /* codechem forms */
     {"+job-application -inbox",
