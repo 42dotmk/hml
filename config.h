@@ -4,8 +4,6 @@
 
 #define LEN(a) ((int)(sizeof(a) / sizeof *(a)))
 
-/* every account is Gmail with the same folder layout; the trash channels
- * carry no Expunge in the mbsync config, so hml must not expunge either */
 static const Channel gmail[] = {
     {"[Gmail]/All Mail", "All", 1},
     {"[Gmail]/Drafts", "Drafts", 1},
@@ -15,18 +13,13 @@ static const Channel gmail[] = {
 
 const Account accounts[] = {
     {"cc", "imap.gmail.com", 993, "smtp.gmail.com", 465, "costa@codechem.com",
-     "gpg -q --for-your-eyes-only --no-tty -d "
-     "~/.password-store/costa@halicea.com.gpg",
+     "gpg -q --for-your-eyes-only --no-tty -d " "~/.password-store/costa@halicea.com.gpg", 
      "~/.mail/cc", gmail, LEN(gmail)},
-    {"km", "imap.gmail.com", 993, "smtp.gmail.com", 465,
-     "kosta.mihajlov@gmail.com",
-     "gpg -q --for-your-eyes-only --no-tty -d "
-     "~/.password-store/kosta.mihajlov@gmail.com.gpg",
+    {"km", "imap.gmail.com", 993, "smtp.gmail.com", 465, "kosta.mihajlov@gmail.com", 
+     "gpg -q --for-your-eyes-only --no-tty -d ~/.password-store/kosta.mihajlov@gmail.com.gpg", 
      "~/.mail/km", gmail, LEN(gmail)},
-    {"chgm", "imap.gmail.com", 993, "smtp.gmail.com", 465,
-     "costa.halicea@gmail.com",
-     "gpg -q --for-your-eyes-only --no-tty -d "
-     "~/.password-store/costa.halicea@gmail.com.gpg",
+    {"chgm", "imap.gmail.com", 993, "smtp.gmail.com", 465, "costa.halicea@gmail.com", 
+     "gpg -q --for-your-eyes-only --no-tty -d ~/.password-store/costa.halicea@gmail.com.gpg",
      "~/.mail/chgm", gmail, LEN(gmail)},
 };
 const int naccounts = LEN(accounts);
@@ -39,8 +32,10 @@ const char *postsend = "hml new"; /* local delivery searchable at once */
 /* local delivery: `hml send` puts mail for anyone @localdomain (or
  * @localhost) into the maildir <localbox>/<localpart>/ instead of
  * handing it to SMTP; no account is needed. `hml new` indexes those
- * boxes as <localdomain>/<localpart> (path:hai/main). hai's sessions
- * and the user's own hai inbox live here. */
+ * boxes as <localdomain>/<localpart> (path:hai/main). hai's agents
+ * (one Maildir each: the inbox in new/, every session in cur/) and the
+ * user's own hai inbox live here; `deleted` on a message here is its T
+ * flag, and `hml recv` expunges it. */
 const char *localdomain = "hai";
 const char *localbox = "~/.mail/hai";
 
@@ -63,19 +58,13 @@ const int nfoldertags = LEN(foldertags);
  * that match the query. Manual `hml tag` edits (kept in
  * <mailroot>/.htags, replayed on rebuild) always win over rules. */
 const TagRule tagrules[] = {
-    /* hai's message bus: every agent's conversation is tag:hai; the
-     * turns (what was said and asked, by anyone, in any agent's
-     * session) stay in the inbox view, the plumbing (system prompts,
-     * tool calls and results, summaries) stays out */
-    {"+hai", "path:hai/**"},
-    {"-inbox", "path:hai/** and not (tag:hai:message or tag:hai:ask or "
-               "tag:hai:answer)"},
+    /* hai's message bus: every agent's conversation is tag:hai and
+     * stays out of the inbox (hed's hai plugin is where it is read) */
+    {"+hai -inbox", "path:hai/**"},
 
     /* codechem forms */
-    {"+job-application -inbox",
-     "from:mailer@codechem.com subject:\"New Contact Application\""},
-    {"+job-application -inbox",
-     "from:mailer@halicea.com subject:\"New Job Application\""},
+    {"+job-application -inbox", "from:mailer@codechem.com subject:\"New Contact Application\""},
+    {"+job-application -inbox", "from:mailer@halicea.com subject:\"New Job Application\""},
     {"+contact -inbox", "to:contact@codechem.com"},
 
     /* notifications / newsletters */
@@ -92,8 +81,7 @@ const TagRule tagrules[] = {
     {"+bank -inbox", "from:revolut.com"},
     {"+bank -inbox", "from:paypal.com"},
     {"+bank -inbox", "from:halkbank.mk"},
-    {"+bank -inbox",
-     "from:deutsche-bank.de or (from:db.com and not from:chess-db.com)"},
+    {"+bank -inbox", "from:deutsche-bank.de or (from:db.com and not from:chess-db.com)"},
     {"+bank -inbox", "from:stb.com.mk"},
     {"+bank -inbox", "from:kb.com.mk"},
 };

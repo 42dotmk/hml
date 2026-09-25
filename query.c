@@ -390,6 +390,13 @@ static void compterm(Query *c, const Node *n) {
         size_t k = strlen(v);
         if (!strcmp(v, "**") || !strcmp(v, "*")) {
             sadd(&c->sql, "1");
+        } else if (k > 2 && !strcmp(v + k - 2, "/*")) {
+            /* one level down, not the whole subtree: the boxes
+             * directly inside it, none of their own children */
+            sadd(&c->sql, "id IN (SELECT msg FROM file WHERE box GLOB ");
+            bindparam(c, strdup(v));
+            snprintf(buf, sizeof buf, " AND instr(substr(box,%zu),'/')=0)", k);
+            sadd(&c->sql, buf);
         } else if (k > 3 && !strcmp(v + k - 3, "/**")) {
             char *box = strdup(v), *glob = malloc(k);
             box[k - 3] = '\0';
@@ -1003,4 +1010,219 @@ int tagsmain(int argc, char **argv) {
     queryfree(&c);
     sqlite3_close(db);
     return rc < 0 ? fail("tags", err) : 0;
+}
+
+/* --- hml address -------------------------------------------------------- */
+
+typedef struct {
+    char *name; /* newest non-empty display name, malloc'd */
+    long sent;  /* messages we sent to it */
+    long seen;  /* messages it sent us, or was a co-recipient on */
+    long last;  /* newest date */
+    long named; /* date of the message the name came from */
+} Addr;
+
+typedef struct {
+    char *key; /* bare address, lowercased */
+    Addr value;
+} AddrKV;
+
+/* runs of letters/digits (any non-ASCII byte counts), lowercased — the
+ * words FTS5's unicode61 tokenizer would make of the typed text */
+static char **words(char *s) {
+    char **w = NULL, *p;
+
+    for (p = s; *p;) {
+        char *b;
+        while (*p && !isalnum((unsigned char)*p) && !((unsigned char)*p & 0x80))
+            p++;
+        if (!*p)
+            break;
+        for (b = p;
+             *p && (isalnum((unsigned char)*p) || (unsigned char)*p & 0x80);
+             p++)
+            *p = (char)tolower((unsigned char)*p);
+        if (*p)
+            *p++ = '\0';
+        arrput(w, b);
+    }
+    return w;
+}
+
+/* the display name of a mailbox, quotes stripped; "" when there is none */
+static void boxname(const char *m, char *out, size_t cap) {
+    const char *lt = strchr(m, '<'), *e = lt ? lt : m;
+    size_t n = 0;
+
+    out[0] = '\0';
+    if (!lt)
+        return;
+    while (m < e && (isspace((unsigned char)*m) || *m == '"' || *m == '\''))
+        m++;
+    while (e > m &&
+           (isspace((unsigned char)e[-1]) || e[-1] == '"' || e[-1] == '\''))
+        e--;
+    for (; m < e && n + 1 < cap; m++)
+        if (*m != '\\')
+            out[n++] = *m;
+    out[n] = '\0';
+}
+
+/* addresses no person reads: bounce handlers, no-reply senders and
+ * notification relays (whose display name is whoever triggered one) */
+static int machine(const char *bare) {
+    static const char *const bad[] = {
+        "bounce",     "noreply",      "no-reply",      "no_reply",
+        "donotreply", "do-not-reply", "mailer-daemon", "notification"};
+    const char *at = strchr(bare, '@');
+    char local[256];
+    size_t k;
+
+    snprintf(local, sizeof local, "%.*s", (int)(at - bare), bare);
+    for (k = 0; k < sizeof bad / sizeof *bad; k++)
+        if (strstr(local, bad[k]))
+            return 1;
+    return 0;
+}
+
+static void tally(AddrKV **h, char **ws, const char *list, int sent,
+                  long date) {
+    char **l = NULL, bare[256], name[256], hay[520];
+    ptrdiff_t i, j;
+    int k;
+
+    mimeaddrs(list, &l);
+    for (i = 0; i < arrlen(l); i++) {
+        Addr *a;
+        mimeaddr(l[i], bare, sizeof bare);
+        boxname(l[i], name, sizeof name);
+        free(l[i]);
+        if (!strchr(bare, '@') || strpbrk(bare, " \t,;<>\"") || machine(bare))
+            continue;
+        for (k = 0; k < naccounts && strcasecmp(bare, accounts[k].user); k++)
+            ;
+        if (k < naccounts) /* ourselves */
+            continue;
+        snprintf(hay, sizeof hay, "%s %s", name, bare);
+        for (j = 0; hay[j]; j++)
+            hay[j] = (char)tolower((unsigned char)hay[j]);
+        for (j = 0; j < arrlen(ws) && strstr(hay, ws[j]); j++)
+            ;
+        if (j < arrlen(ws))
+            continue;
+        if (shgeti(*h, bare) < 0) {
+            Addr z = {NULL, 0, 0, 0, 0};
+            shput(*h, bare, z);
+        }
+        a = &(*h)[shgeti(*h, bare)].value;
+        *(sent ? &a->sent : &a->seen) += 1;
+        if (date > a->last)
+            a->last = date;
+        if (*name && (!a->name || date >= a->named)) {
+            free(a->name);
+            a->name = strdup(name);
+            a->named = date;
+        }
+    }
+    arrfree(l);
+}
+
+/* people we wrote to first (most often, then most recently), then the
+ * ones who only wrote to us */
+static int addrcmp(const void *x, const void *y) {
+    const Addr *a = &((const AddrKV *)x)->value,
+               *b = &((const AddrKV *)y)->value;
+
+    if ((a->sent > 0) != (b->sent > 0))
+        return a->sent > 0 ? -1 : 1;
+    if (a->sent + a->seen != b->sent + b->seen)
+        return a->sent + a->seen > b->sent + b->seen ? -1 : 1;
+    return a->last > b->last ? -1 : a->last < b->last;
+}
+
+/* hml address [--limit=N] [--] [words]: the addresses we correspond with
+ * whose name or address contains every word, as ready-to-paste
+ * mailboxes; no words = everyone we ever sent to */
+int addressmain(int argc, char **argv) {
+    AddrKV *h = NULL;
+    sqlite3 *db;
+    sqlite3_stmt *st;
+    char *text = NULL, *match = NULL, **ws, dberr[256];
+    long limit = 20;
+    ptrdiff_t i;
+    int k;
+
+    for (k = 0; k < argc && argv[k][0] == '-'; k++) {
+        if (!strcmp(argv[k], "--")) {
+            k++;
+            break;
+        } else if (!strncmp(argv[k], "--limit=", 8))
+            limit = atol(argv[k] + 8);
+        else {
+            fputs("usage: hml address [--limit=N] [--] [words]\n", stderr);
+            return 2;
+        }
+    }
+    for (; k < argc; k++) {
+        sadd(&text, argv[k]);
+        arrput(text, ' ');
+    }
+    arrput(text, '\0');
+    ws = words(text);
+    if (arrlen(ws)) {
+        sadd(&match, "{sender rcpt} : (");
+        for (i = 0; i < arrlen(ws); i++) {
+            sadd(&match, i ? " \"" : "\"");
+            sadd(&match, ws[i]);
+            sadd(&match, "\"*");
+        }
+        sadd(&match, ")");
+    }
+    arrput(match, '\0');
+    if (!(db = dbopen(dberr, sizeof dberr)))
+        return fail("address", strdup(dberr));
+    if (sqlite3_prepare_v2(
+            db,
+            arrlen(ws) ? "SELECT sender,rcpt,date,id IN (SELECT msg FROM tag"
+                         " WHERE name='sent') FROM msg WHERE id IN (SELECT"
+                         " rowid FROM fts WHERE fts MATCH ?)"
+                       : "SELECT sender,rcpt,date,1 FROM msg WHERE id IN"
+                         " (SELECT msg FROM tag WHERE name='sent')",
+            -1, &st, NULL) != SQLITE_OK) {
+        fail("address", strdup(sqlite3_errmsg(db)));
+        sqlite3_close(db);
+        return 2;
+    }
+    if (arrlen(ws))
+        sqlite3_bind_text(st, 1, match, -1, SQLITE_STATIC);
+    sh_new_strdup(h);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        int sent = sqlite3_column_int(st, 3);
+        long date = (long)sqlite3_column_int64(st, 2);
+        /* what we sent counts its recipients; what we got counts its
+         * sender and the others it went to */
+        if (!sent)
+            tally(&h, ws, (const char *)sqlite3_column_text(st, 0), 0, date);
+        tally(&h, ws, (const char *)sqlite3_column_text(st, 1), sent, date);
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    qsort(h, (size_t)shlen(h), sizeof *h, addrcmp);
+    for (i = 0; i < shlen(h); i++) {
+        const char *n = h[i].value.name;
+        if (i < limit || limit < 0) {
+            if (!n || !*n)
+                printf("%s\n", h[i].key);
+            else if (strpbrk(n, ",;:<>@()[]\""))
+                printf("\"%s\" <%s>\n", n, h[i].key);
+            else
+                printf("%s <%s>\n", n, h[i].key);
+        }
+        free(h[i].value.name);
+    }
+    shfree(h);
+    arrfree(ws);
+    arrfree(text);
+    arrfree(match);
+    return 0;
 }

@@ -103,7 +103,7 @@ How the index works (index.c, mime.c, query.c):
   16 hex digits like notmuch.
 - Tags: `retag` recomputes a message's `tag` rows whenever one of its
   files changes or its overrides do. Derived first —
-  `unread`/`flagged`/`replied`/`draft`/`passed` from the union of its
+  `unread`/`flagged`/`replied`/`draft`/`passed`/`deleted` (T) from the union of its
   files' maildir flags, folder tags from `foldertags` in config.h
   (Sent→sent, Drafts→draft, Trash→deleted), `inbox` when no file is in
   a listed folder — then user overrides from `utag` applied on top
@@ -166,17 +166,33 @@ the blank line. Mixed recipient lists deliver locally first, then
 submit the rest; an all-local list needs no account at all. `hml new`
 walks `<localbox>` recursively, up to three deep (`scanlocal`), every
 directory with a `cur/` being a box named by its relative path
-(`hai/main`, `hai/s/<session>`); `hml.c boxroot` resolves both account
+(`hai/main`, `hai/<agent>`); `hml.c boxroot` resolves both account
 boxes and local ones (`filepath` and `mirrorflags` use it). This is
 hai's message bus and conversation store (`main@hai` is the agent,
-`user@hai` the person, `hai/s/<id>` one conversation each; the format
-is hai's `MAIL.md`). `mailparse` reads `Hai-Intent` into `msg.intent`
+`user@hai` the person, `hai/<agent>` one agent's Maildir with every
+conversation a thread in its `cur/`; the format is hai's `MAIL.md`).
+`deleted` on a local message (`localrow`) is both an override and the
+T flag: `hml tag` puts it in both lists and `mirrorflags` renames only
+the local rows, so hai, which reads files, skips it; `retag` derives
+`deleted` from a T. `hml recv` then removes the T files of every local
+box (`expungelocal`, cur/ and new/, as deep as `scanlocal`) — the local
+boxes have no server to expunge on. On an account `deleted` stays an
+override, as a T there would reach IMAP and its expunge. `mailparse` reads `Hai-Intent` into `msg.intent`
 (a column added by `ensureintent`, no backfill) and `retag` derives the
 tag `hai:<intent>` from it, so `not tag:hai:tool-call` is the human
 view of a session. `hml show --entire-thread` expands the hits to every
 message of their threads in date order (one extra subquery in
 `showmain`). `postsend` is `hml new`, so local delivery is searchable
 at once (the mtime gate keeps it at milliseconds).
+
+`hml address` (query.c `addressmain`): To:/Cc: completion for MUAs.
+The FTS table is contentless, so recipients are kept readable in
+`msg.rcpt` (decoded To/Cc/Bcc, added by `ensurecol`; `fillrcpt` in
+`hml new` backfills Sent mail once, guarded by `meta(rcptfill)`). The
+typed words become an FTS prefix query over sender/rcpt for candidate
+messages; their mailboxes are tallied in C (split with mime.c
+`mimeaddrs`, shared with show.c), kept when every word is a substring
+of `name addr`, ranked sent-to first, then by count, then recency.
 
 Next: per-folder connection fan-out, COMPRESS=DEFLATE, IDLE daemon mode.
 

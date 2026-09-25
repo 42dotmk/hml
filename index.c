@@ -219,24 +219,28 @@ static void refine(sqlite3 *db) {
     arrfree(refine_q.c);
 }
 
-/* msg.intent (hai's session messages) arrived later too; no backfill:
- * the boxes that carry it did not exist before the column */
-static void ensureintent(sqlite3 *db) {
+/* a column added after the first indexes were built, "" for old rows.
+ * msg.intent (hai's session messages): no backfill, the boxes that carry
+ * it did not exist before the column. msg.rcpt (To/Cc/Bcc, decoded, for
+ * hml address; the FTS copy is contentless): Sent mail is backfilled once
+ * by hml new (fillrcpt), everything newer arrives with it. */
+static void ensurecol(sqlite3 *db, const char *name) {
     sqlite3_stmt *st;
+    char q[128];
     int have = 0;
 
     if (sqlite3_prepare_v2(db,
                            "SELECT 1 FROM pragma_table_info('msg')"
-                           " WHERE name='intent'",
+                           " WHERE name=?",
                            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
         have = sqlite3_step(st) == SQLITE_ROW;
         sqlite3_finalize(st);
     }
+    snprintf(q, sizeof q,
+             "ALTER TABLE msg ADD COLUMN %s TEXT NOT NULL DEFAULT ''", name);
     if (!have)
-        sqlite3_exec(db,
-                     "ALTER TABLE msg ADD COLUMN intent TEXT NOT NULL"
-                     " DEFAULT ''",
-                     NULL, NULL, NULL);
+        sqlite3_exec(db, q, NULL, NULL, NULL);
 }
 
 static void migrate(sqlite3 *db) {
@@ -315,7 +319,8 @@ sqlite3 *dbopen(char *err, size_t errlen) {
         return NULL;
     }
     migrate(db);
-    ensureintent(db);
+    ensurecol(db, "intent");
+    ensurecol(db, "rcpt");
     return db;
 }
 
@@ -349,7 +354,7 @@ static sqlite3_stmt *prep(Db *d, const char *sql) {
 static void prepall(Db *d) {
     d->msgbymid = prep(d, "SELECT id FROM msg WHERE mid=?");
     d->insmsg = prep(d, "INSERT INTO msg(mid,thread,date,subject,sender,"
-                        "attach,intent) VALUES(?,?,?,?,?,?,?)");
+                        "attach,intent,rcpt) VALUES(?,?,?,?,?,?,?,?)");
     d->attachof = prep(d, "SELECT attach FROM msg WHERE id=?");
     d->intentof = prep(d, "SELECT intent FROM msg WHERE id=?");
     d->setattach = prep(d, "UPDATE msg SET attach=1 WHERE id=? AND attach=0");
@@ -457,6 +462,8 @@ static void retag(Db *d, sqlite3_int64 id) {
         tags[nt++] = strdup("draft");
     if (strchr(flags, 'P'))
         tags[nt++] = strdup("passed");
+    if (strchr(flags, 'T'))
+        tags[nt++] = strdup("deleted");
     sqlite3_bind_int64(d->attachof, 1, id);
     if (step1(d, d->attachof) > 0)
         tags[nt++] = strdup("attachment");
@@ -564,6 +571,15 @@ static unsigned flagof(const char *name, int *inverted) {
     return 0;
 }
 
+/* `deleted` on a local message (hai's boxes) is also its T flag, so a
+ * reader of the files - hai skipping a deleted turn - sees it without
+ * the index, and `hml recv` expunges it. On an account it stays an
+ * override: a T there would reach the server and its expunge */
+static int localrow(const char *box) {
+    size_t n = strlen(localdomain);
+    return !strncmp(box, localdomain, n) && box[n] == '/';
+}
+
 /* apply the flag ops to every file of a message: rename in the maildir
  * (seen mail graduates new/ -> cur/), mirror the row, drop any stale
  * override of the same name, then recompute the tags */
@@ -593,8 +609,12 @@ static void mirrorflags(Db *d, sqlite3_int64 id, const char *mid,
         char boxdir[4160], name[512], fl[8], err[256];
         Local m;
         for (k = 0; k < arrlen(ops); k++) {
-            if (!(bit = flagof(ops[k].name, &inv)))
+            inv = 0;
+            if (!(bit = flagof(ops[k].name, &inv)) &&
+                (strcmp(ops[k].name, "deleted") || !localrow(rows[i].box)))
                 continue;
+            if (!bit)
+                bit = FDeleted;
             if (ops[k].on != inv)
                 nf |= bit;
             else
@@ -626,6 +646,8 @@ static void mirrorflags(Db *d, sqlite3_int64 id, const char *mid,
         step1(d, d->mvfile);
     }
     for (k = 0; k < arrlen(ops); k++) { /* a flag is never an override */
+        if (!flagof(ops[k].name, &inv))
+            continue; /* deleted: an override as well */
         bindtext(d->utagdel, 1, mid);
         bindtext(d->utagdel, 2, ops[k].name);
         step1(d, d->utagdel);
@@ -719,6 +741,44 @@ static void metaset(Db *d, const char *key, long v) {
     bindtext(d->metaset, 1, key);
     sqlite3_bind_int64(d->metaset, 2, v);
     step1(d, d->metaset);
+}
+
+/* msg.rcpt for mail indexed before the column existed, once: only what we
+ * sent (a few thousand files), since those recipients are the ones hml
+ * address ranks first; received mail's Cc lists fill in as it arrives */
+static void fillrcpt(Db *d) {
+    sqlite3_stmt *st, *set;
+    char path[4608], *buf;
+    size_t len;
+    long n = 0;
+    Mail m;
+
+    if (metaint(d, "rcptfill"))
+        return;
+    st = prep(d, "SELECT msg.id,file.box,file.sub,file.name FROM msg JOIN"
+                 " file ON file.msg=msg.id WHERE msg.rcpt='' AND msg.id IN"
+                 " (SELECT msg FROM tag WHERE name='sent') GROUP BY msg.id");
+    set = prep(d, "UPDATE msg SET rcpt=? WHERE id=?");
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (!filepath((const char *)sqlite3_column_text(st, 1),
+                      (const char *)sqlite3_column_text(st, 2),
+                      (const char *)sqlite3_column_text(st, 3), path,
+                      sizeof path) ||
+            readfile(path, &buf, &len) < 0)
+            continue;
+        mailparse(buf, len, &m);
+        bindtext(set, 1, m.to);
+        sqlite3_bind_int64(set, 2, sqlite3_column_int64(st, 0));
+        step1(d, set);
+        mailfree(&m);
+        free(buf);
+        n++;
+    }
+    sqlite3_finalize(st);
+    sqlite3_finalize(set);
+    metaset(d, "rcptfill", 1);
+    if (n)
+        fprintf(stderr, "hml new: recipients backfilled for %ld sent\n", n);
 }
 
 /* apply whatever the log holds beyond what this index has seen; only
@@ -883,6 +943,7 @@ static void addfile(Db *d, const Job *j, const Mail *m) {
         bindtext(d->insmsg, 5, m->from);
         sqlite3_bind_int(d->insmsg, 6, m->hasatt);
         bindtext(d->insmsg, 7, m->intent ? m->intent : "");
+        bindtext(d->insmsg, 8, m->to);
         step1(d, d->insmsg);
         id = sqlite3_last_insert_rowid(d->db);
         if (!thread) {
@@ -1296,7 +1357,7 @@ int newmain(int argc, char **argv) {
         }
     }
     /* the local boxes: every maildir under localbox, up to three deep
-     * (hai/main, hai/s/<session>), named by their relative path */
+     * (hai/main, hai/<agent>, hai/user), named by their relative path */
     expand(localbox, root, sizeof root);
     scanlocal(&d, &sc, root, "", 0, force);
     prunegone(&d, &sc);
@@ -1310,6 +1371,7 @@ int newmain(int argc, char **argv) {
     if (d.newmsgs)
         applyrules(&d);
     taglogreplay(&d); /* after the rules: manual edits win on a rebuild */
+    fillrcpt(&d);
     for (j = 0; j < arrlen(sc.dirs); j++) {
         bindtext(d.dirset, 1, sc.dirs[j].path);
         sqlite3_bind_int64(d.dirset, 2, sc.dirs[j].mtime);
@@ -1378,13 +1440,16 @@ int tagmain(int argc, char **argv) {
         fprintf(stderr, "hml tag: %s\n", dberr);
         return 2;
     }
-    /* flag tags act on the files, the rest are logged overrides */
+    /* flag tags act on the files, the rest are logged overrides;
+     * deleted is both (the files only in the local boxes) */
     for (i = 0; i < arrlen(ops); i++) {
         int inv;
         if (flagof(ops[i].name, &inv))
             arrput(flagops, ops[i]);
         else
             arrput(tagops, ops[i]);
+        if (!strcmp(ops[i].name, "deleted"))
+            arrput(flagops, ops[i]);
     }
     prepall(&d);
     exec(&d, "BEGIN IMMEDIATE");

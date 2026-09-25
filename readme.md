@@ -124,12 +124,22 @@ hml tags                                   # every tag in the index
 hml tags from:linkedin.com                 # tags across the matches
 ```
 
+`hml address [--limit=N] [words]` lists the correspondents whose name
+or address contains every word, as ready-to-paste `Name <addr>`
+mailboxes (an editor's To:/Cc: completion): people you sent to first,
+by how often, then those who only wrote to you; bounce, no-reply and
+notification senders and your own accounts are left out. No words
+lists everyone you ever sent to. Recipients come from `msg.rcpt`; mail
+indexed before that column existed has it backfilled once, for Sent
+only, by the next `hml new`.
+
 `hml count --batch` reads one query per stdin line and prints one count
 per line; `--` ends the options everywhere, so `hml search -- <query>`
 works as the notmuch habit has it.
 
 Terms: bare words (all fields), `subject:` `from:` `to:` `attachment:`
-`body:`, `tag:`, `id:`, `thread:`, `path:cc/**` (an account) or
+`body:`, `tag:`, `id:`, `thread:`, `path:cc/**` (an account),
+`path:cc/*` (the boxes one level down, not their children) or
 `path:cc/Sent` (one box), `date:2026-08-01..2026-08-21`, `date:7d..`,
 `date:yesterday..today`, `date:2026-08`; `and`/`or`/`not`, parentheses,
 implicit `and`; a trailing `*` makes a prefix match.
@@ -137,8 +147,8 @@ implicit `and`; a trailing `*` makes a prefix match.
 Tags come from three places, and the index never has to be trusted
 with any of them:
 
-- **Derived**: `unread`, `flagged`, `replied`, `draft`, `passed` from
-  the maildir flags; `sent`/`draft`/`deleted` from the folder (the
+- **Derived**: `unread`, `flagged`, `replied`, `draft`, `passed`,
+  `deleted` (T) from the maildir flags; `sent`/`draft`/`deleted` from the folder (the
   `foldertags` table in `config.h`); `inbox` for anything not in one of
   those folders — so what Gmail shows on your phone and what
   `tag:inbox` returns are the same set; `attachment` for a message that
@@ -222,13 +232,18 @@ message bus: `main@hai` is the agent, `user@hai` is you.
 ```sh
 printf 'Subject: check the build\n\nhwm fails to link.\n' | hml send main@hai
 hml search to:user@hai tag:unread     # what hai left for you
-hml search path:hai/s/**              # hai's conversations, one folder each
+hml search path:hai/main              # main's conversations, one thread each
 hml show --entire-thread thread:ID    # one of them, in order
 ```
 
-hai keeps its conversations in this tree too (`hai/s/<id>`, one
-message file per turn, `Hai-*` headers, `hai:<intent>` tags), so
-`hml reply` to anything hai sent continues that conversation.
+hai keeps its conversations in this tree too: every agent's Maildir
+(`hai/<agent>`) holds its inbox in `new/` and every conversation in
+`cur/`, one thread each, one message file per turn (`Hai-*` headers,
+`hai:<intent>` tags), so `hml reply` to anything hai sent continues
+that conversation. `deleted` on a message in these local boxes is the
+maildir T flag as well as a tag, so hai stops reading it at once, and
+`hml recv` removes the file - the local boxes' expunge; on your
+accounts `deleted` stays a tag and never reaches the server.
 
 ## Configuration
 

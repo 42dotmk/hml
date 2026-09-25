@@ -4,7 +4,9 @@
  * a message / one decoded MIME part as raw bytes; "hml reply" prints a
  * reply template (headers, blank line, quoted text) for the newest match.
  * Parts are numbered pre-order from 1 like notmuch, so a part id found in
- * the text output addresses the same part in --format=raw --part=N. */
+ * the text output addresses the same part in --format=raw --part=N. A
+ * body line that starts with a form feed goes out with it doubled, so
+ * a mail quoting this output cannot pass for framing (see putbody). */
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +28,31 @@ typedef struct {
     char *box;  /* "acct/Sub" */
     char *path; /* absolute maildir file */
 } Hit;
+
+/* A text part's body, line by line, with a leading form feed doubled.
+ * A mail may quote the output of this very command verbatim — hai's
+ * tool results are full of it — and the reader must not read that
+ * framing as this stream's: no marker of ours ever starts with two.
+ * The closing marker gets its own line. */
+static void putbody(const char *s, size_t n) {
+    size_t a = 0;
+
+    if (!n) {
+        putchar('\n');
+        return;
+    }
+    while (a < n) {
+        size_t b = a;
+
+        while (b < n && s[b] != '\n')
+            b++;
+        if (s[a] == '\f')
+            putchar('\f');
+        fwrite(s + a, 1, b - a, stdout);
+        putchar('\n');
+        a = b + 1;
+    }
+}
 
 static void sadd(char **b, const char *t) {
     size_t n = strlen(t);
@@ -311,9 +338,7 @@ static void walk(Walk *w, const char *s, size_t n) {
         printf("\fpart{ ID: %d, Content-type: %s\n", id, type);
         if (strcmp(type, "text/html") || w->html) {
             u = textof(ct, cte, s + bo, n - bo);
-            fwrite(u, 1, arrlenu(u), stdout);
-            if (!arrlenu(u) || arrlast(u) != '\n')
-                putchar('\n'); /* the closing marker gets its own line */
+            putbody(u, arrlenu(u));
             arrfree(u);
         }
         puts("\fpart}");
@@ -521,67 +546,11 @@ int showmain(int argc, char **argv) {
 
 /* --- hml reply ----------------------------------------------------------- */
 
-/* split an address header on the commas between mailboxes (not the ones
- * inside quotes or <>), each trimmed; stb array of malloc'd strings */
-static void addrsplit(const char *v, char ***out) {
-    const char *p = v, *start = v;
-    int quote = 0, angle = 0;
-
-    for (;; p++) {
-        if (*p == '"' && !angle)
-            quote = !quote;
-        else if (*p == '<' && !quote)
-            angle = 1;
-        else if (*p == '>' && !quote)
-            angle = 0;
-        if ((*p == ',' && !quote && !angle) || !*p) {
-            const char *e = p;
-            while (start < e && isspace((unsigned char)*start))
-                start++;
-            while (e > start && isspace((unsigned char)e[-1]))
-                e--;
-            if (e > start) {
-                char *a = malloc((size_t)(e - start) + 1);
-                memcpy(a, start, (size_t)(e - start));
-                a[e - start] = '\0';
-                arrput(*out, a);
-            }
-            if (!*p)
-                return;
-            start = p + 1;
-        }
-    }
-}
-
-/* the bare address of a mailbox, lowercased */
-static void addrof(const char *m, char *out, size_t cap) {
-    const char *lt = strchr(m, '<'), *gt = lt ? strchr(lt, '>') : NULL, *s, *e;
-    size_t i, n;
-
-    if (lt && gt) {
-        s = lt + 1;
-        e = gt;
-    } else {
-        s = m;
-        e = m + strlen(m);
-        while (s < e && isspace((unsigned char)*s))
-            s++;
-        while (e > s && isspace((unsigned char)e[-1]))
-            e--;
-    }
-    n = (size_t)(e - s);
-    if (n >= cap)
-        n = cap - 1;
-    for (i = 0; i < n; i++)
-        out[i] = (char)tolower((unsigned char)s[i]);
-    out[n] = '\0';
-}
-
 static int sameaddr(const char *a, const char *b) {
     char x[256], y[256];
 
-    addrof(a, x, sizeof x);
-    addrof(b, y, sizeof y);
+    mimeaddr(a, x, sizeof x);
+    mimeaddr(b, y, sizeof y);
     return !strcmp(x, y);
 }
 
@@ -618,7 +587,7 @@ static char **mailboxes(Hdr *h, const char *name) {
     if (!v)
         return NULL;
     d = mimedecode(v);
-    addrsplit(d, &l);
+    mimeaddrs(d, &l);
     free(d);
     free(v);
     return l;

@@ -173,6 +173,10 @@ char *mimecte(const char *cte, const char *s, size_t n); /* stb array */
 void mimeutf8(char **out, const char *cs, const char *in, size_t n);
 void mimehtmltext(char **out, const char *s, size_t n);
 long mimedate(const char *s); /* RFC 5322 date -> epoch, 0 if hopeless */
+/* an address header split on the commas between mailboxes (not those in
+ * quotes or <>), each trimmed: stb array of malloc'd strings */
+void mimeaddrs(const char *v, char ***out);
+void mimeaddr(const char *m, char *out, size_t cap); /* bare, lowercased */
 
 typedef struct {
     char *mid;     /* Message-ID without brackets; synthesized if absent */
@@ -215,6 +219,7 @@ void queryfree(Query *c);
 int searchmain(int argc, char **argv);
 int countmain(int argc, char **argv);
 int tagsmain(int argc, char **argv);
+int addressmain(int argc, char **argv);
 /* box "acct/Sub" + sub + name -> absolute path; 0 if the account is gone */
 int filepath(const char *box, const char *sub, const char *name, char *out,
              size_t cap);

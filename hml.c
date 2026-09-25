@@ -1,12 +1,15 @@
 /* hml - keep maildirs and IMAP mailboxes in step, sharing mbsync's own
  * on-disk sync state so the two tools stay interchangeable */
+#include <dirent.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #define STB_DS_IMPLEMENTATION
 #include <stb_ds.h>
@@ -89,6 +92,47 @@ int boxroot(const char *box, char *out, size_t cap) {
     return 0;
 }
 
+/* the local boxes have no server to expunge on: `hml recv` removes
+ * their files flagged T (deleted) itself, cur/ and new/ of every
+ * maildir under dir, as deep as the index looks */
+static long expungelocal(const char *dir, int depth) {
+    static const char *const subs[] = {"cur", "new"};
+    char path[4400];
+    struct dirent *e;
+    struct stat st;
+    long n = 0;
+    DIR *dp;
+    int k;
+
+    for (k = 0; k < 2; k++) {
+        snprintf(path, sizeof path, "%.4000s/%s", dir, subs[k]);
+        if (!(dp = opendir(path)))
+            continue;
+        while ((e = readdir(dp))) {
+            const char *info = strstr(e->d_name, ":2,");
+            if (!info || !strchr(info + 3, 'T'))
+                continue;
+            snprintf(path, sizeof path, "%.4000s/%s/%.300s", dir, subs[k],
+                     e->d_name);
+            if (unlink(path) == 0)
+                n++;
+        }
+        closedir(dp);
+    }
+    if (depth > 3 || !(dp = opendir(dir)))
+        return n;
+    while ((e = readdir(dp))) {
+        if (e->d_name[0] == '.' || !strcmp(e->d_name, "cur") ||
+            !strcmp(e->d_name, "new") || !strcmp(e->d_name, "tmp"))
+            continue;
+        snprintf(path, sizeof path, "%.4000s/%.300s", dir, e->d_name);
+        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
+            n += expungelocal(path, depth + 1);
+    }
+    closedir(dp);
+    return n;
+}
+
 static Imap *acctconnect(const Account *a, const char *pass, char *err,
                          size_t errlen) {
     Imap *im = imapconnect(a->host, a->port, err, errlen);
@@ -161,6 +205,8 @@ static int usage(int rc) {
           "  count    hml count [--batch] [--output=messages|threads|files]\n"
           "           <query>; --batch: one query per stdin line\n"
           "  tags     hml tags [<query>]: every tag, or those of the matches\n"
+          "  address  hml address [--limit=N] [words]: correspondents whose\n"
+          "           name or address has every word, as mailboxes\n"
           "  tag      hml tag +tag|-tag ... [--] <query>: add/remove tags\n"
           "  show     hml show [--format=text|raw|mbox] [--part=N]\n"
           "           [--include-html] [--] <query>: messages in notmuch's\n"
@@ -195,6 +241,8 @@ int main(int argc, char *argv[]) {
             return countmain(argc - 2, argv + 2);
         } else if (!strcmp(argv[1], "tags")) {
             return tagsmain(argc - 2, argv + 2);
+        } else if (!strcmp(argv[1], "address")) {
+            return addressmain(argc - 2, argv + 2);
         } else if (!strcmp(argv[1], "tag")) {
             return tagmain(argc - 2, argv + 2);
         } else if (!strcmp(argv[1], "show")) {
@@ -259,6 +307,13 @@ int main(int argc, char *argv[]) {
     clock_gettime(CLOCK_MONOTONIC, &t1);
     printf("%.2fs\n", (double)(t1.tv_sec - t0.tv_sec) +
                           (double)(t1.tv_nsec - t0.tv_nsec) / 1e9);
+    if (mode == MSync) {
+        char root[4096];
+        long n;
+        expand(localbox, root, sizeof root);
+        if ((n = expungelocal(root, 1)) > 0)
+            printf("%s: %ld expunged\n", localdomain, n);
+    }
     fflush(stdout); /* keep our output ahead of the hook's */
     if (mode == MSync && postrecv[0] && system(postrecv) != 0)
         fputs("hml: post-recv command failed\n", stderr);

@@ -842,3 +842,59 @@ void mimeutf8(char **out, const char *cs, const char *in, size_t n) {
 }
 void mimehtmltext(char **out, const char *s, size_t n) { htmltext(out, s, n); }
 long mimedate(const char *s) { return parsedate(s); }
+
+/* split an address header on the commas between mailboxes (not the ones
+ * inside quotes or <>), each trimmed; stb array of malloc'd strings */
+void mimeaddrs(const char *v, char ***out) {
+    const char *p = v, *start = v;
+    int quote = 0, angle = 0;
+
+    for (;; p++) {
+        if (*p == '"' && !angle)
+            quote = !quote;
+        else if (*p == '<' && !quote)
+            angle = 1;
+        else if (*p == '>' && !quote)
+            angle = 0;
+        if ((*p == ',' && !quote && !angle) || !*p) {
+            const char *e = p;
+            while (start < e && isspace((unsigned char)*start))
+                start++;
+            while (e > start && isspace((unsigned char)e[-1]))
+                e--;
+            if (e > start) {
+                char *a = malloc((size_t)(e - start) + 1);
+                memcpy(a, start, (size_t)(e - start));
+                a[e - start] = '\0';
+                arrput(*out, a);
+            }
+            if (!*p)
+                return;
+            start = p + 1;
+        }
+    }
+}
+
+/* the bare address of a mailbox, lowercased */
+void mimeaddr(const char *m, char *out, size_t cap) {
+    const char *lt = strchr(m, '<'), *gt = lt ? strchr(lt, '>') : NULL, *s, *e;
+    size_t i, n;
+
+    if (lt && gt) {
+        s = lt + 1;
+        e = gt;
+    } else {
+        s = m;
+        e = m + strlen(m);
+        while (s < e && isspace((unsigned char)*s))
+            s++;
+        while (e > s && isspace((unsigned char)e[-1]))
+            e--;
+    }
+    n = (size_t)(e - s);
+    if (n >= cap)
+        n = cap - 1;
+    for (i = 0; i < n; i++)
+        out[i] = (char)tolower((unsigned char)s[i]);
+    out[n] = '\0';
+}
