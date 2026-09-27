@@ -1368,8 +1368,10 @@ int newmain(int argc, char **argv) {
         exec(&d, "COMMIT");
     }
     exec(&d, "BEGIN IMMEDIATE");
-    if (d.newmsgs)
+    if (d.newmsgs) {
         applyrules(&d);
+        gwinbound(d.db); /* mail from outside, onto the bus */
+    }
     taglogreplay(&d); /* after the rules: manual edits win on a rebuild */
     fillrcpt(&d);
     for (j = 0; j < arrlen(sc.dirs); j++) {

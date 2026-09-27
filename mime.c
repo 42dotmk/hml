@@ -606,10 +606,11 @@ static char *ctedecode(const char *cte, const char *s, size_t n) {
     return out;
 }
 
-static void walk(Ctx *c, const char *s, size_t n);
+typedef void (*Partfn)(void *ud, const char *s, size_t n);
 
-/* the parts between --boundary lines, each walked as its own entity */
-static void multipart(Ctx *c, const char *s, size_t n, const char *b) {
+/* the parts between --boundary lines, each handed to fn as an entity */
+static void multipart(const char *s, size_t n, const char *b, Partfn fn,
+                      void *ud) {
     size_t bl = strlen(b), pos = 0, start = 0, end;
     const char *nl;
     int in = 0;
@@ -620,7 +621,7 @@ static void multipart(Ctx *c, const char *s, size_t n, const char *b) {
         if (end - pos >= bl + 2 && s[pos] == '-' && s[pos + 1] == '-' &&
             !memcmp(s + pos + 2, b, bl)) {
             if (in)
-                walk(c, s + start, pos > start ? pos - start : 0);
+                fn(ud, s + start, pos > start ? pos - start : 0);
             if (end - pos >= bl + 4 && s[pos + bl + 2] == '-' &&
                 s[pos + bl + 3] == '-')
                 return; /* closing delimiter */
@@ -630,8 +631,12 @@ static void multipart(Ctx *c, const char *s, size_t n, const char *b) {
         pos = end;
     }
     if (in)
-        walk(c, s + start, n - start);
+        fn(ud, s + start, n - start);
 }
+
+static void walk(Ctx *c, const char *s, size_t n);
+
+static void walkpart(void *ud, const char *s, size_t n) { walk(ud, s, n); }
 
 /* one entity: its own header block, then whatever the type says */
 static void walk(Ctx *c, const char *s, size_t n) {
@@ -672,7 +677,7 @@ static void walk(Ctx *c, const char *s, size_t n) {
     if (!strncmp(type, "multipart/", 10) && ct && c->depth < DepthMax) {
         if ((b = param(ct, "boundary"))) {
             c->depth++;
-            multipart(c, s + bo, n - bo, b);
+            multipart(s + bo, n - bo, b, walkpart, c);
             c->depth--;
             free(b);
         }
@@ -700,6 +705,76 @@ static void walk(Ctx *c, const char *s, size_t n) {
     free(cte);
     free(cd);
     arrfree(h);
+}
+
+/* --- the reader's text -------------------------------------------------- */
+
+typedef struct {
+    char *plain, *html; /* stb arrays: the first leaf of each kind */
+    int depth;
+} Plain;
+
+static void plainpart(void *ud, const char *s, size_t n);
+
+/* the first text/plain leaf that is not an attachment, and failing
+ * that the first text/html, decoded to UTF-8 */
+static void plainwalk(Plain *p, const char *s, size_t n) {
+    Hdr *h = NULL;
+    size_t bo = headers(s, n, &h);
+    char *ct = hget(h, "Content-Type"),
+         *cte = hget(h, "Content-Transfer-Encoding"),
+         *cd = hget(h, "Content-Disposition"), *b, *dec, *cs, *u,
+         type[128] = "text/plain";
+    int att = cd && !strncasecmp(cd, "attachment", 10);
+
+    if (ct)
+        mediatype(ct, type, sizeof type);
+    if (!strncmp(type, "multipart/", 10) && ct && p->depth < DepthMax) {
+        if ((b = param(ct, "boundary"))) {
+            p->depth++;
+            multipart(s + bo, n - bo, b, plainpart, p);
+            p->depth--;
+            free(b);
+        }
+    } else if (!att && ((!strcmp(type, "text/plain") && !p->plain) ||
+                        (!strcmp(type, "text/html") && !p->html))) {
+        char **out = type[5] == 'p' ? &p->plain : &p->html;
+        dec = ctedecode(cte, s + bo, n - bo);
+        cs = ct ? param(ct, "charset") : NULL;
+        u = NULL;
+        toutf8(&u, cs, dec, arrlenu(dec));
+        if (type[5] == 'h')
+            htmltext(out, u, arrlenu(u));
+        else
+            putn(out, u, arrlenu(u));
+        arrfree(u);
+        arrfree(dec);
+        free(cs);
+    }
+    free(ct);
+    free(cte);
+    free(cd);
+    arrfree(h);
+}
+
+static void plainpart(void *ud, const char *s, size_t n) {
+    plainwalk(ud, s, n);
+}
+
+char *mimeplain(const char *s, size_t n) {
+    Plain p = {NULL, NULL, 0};
+    char *r;
+
+    plainwalk(&p, s, n);
+    if (p.plain) {
+        r = fin(&p.plain);
+        arrfree(p.html);
+    } else if (p.html)
+        r = fin(&p.html);
+    else
+        r = strdup("");
+    utf8fix(r);
+    return r;
 }
 
 /* --- message ----------------------------------------------------------- */

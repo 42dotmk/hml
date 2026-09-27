@@ -185,6 +185,41 @@ message of their threads in date order (one extra subquery in
 `showmain`). `postsend` is `hml new`, so local delivery is searchable
 at once (the mtime gate keeps it at milliseconds).
 
+The gateway (gateway.c): the bus meets the outside through the
+accounts. Inbound, `hml new` looks at the messages it just indexed
+from account boxes: a match of a route's query (`routes[]` in
+config.h, `to:costa+hai@codechem.com and from:<own addresses>` →
+`main@hai`) is a fresh message from outside; a message whose
+In-Reply-To/References names a logged crossing is a reply and goes to
+the bus address that sent that, stamped `Hai-Intent: answer` when the
+crossing was an `ask` (haid takes it as the answer; anything else is a
+turn, which is how haid treats inbox mail anyway). Either is rewritten
+into bus form (`busdeliver`: UTF-8 text/plain, no encoding, the first
+text/plain leaf via mime.c `mimeplain`, the quoted mail below the
+answer and phone signatures dropped by `unquote`, Message-ID kept) and
+delivered with `mddeliver`. Outbound, `hml send` delivering to
+`gateway` (config.h, `user@hai`) a message that answers a logged
+crossing also submits it to the outside party through the crossing's
+account (`gwoutbound`: `From: "main@hai" <account>`, `Hai-*` headers
+dropped, threading headers kept), and a bus message with an outside
+recipient (a question Cc'd to yourself) is logged so its replies come
+back. `smtpsubmit` is the SMTP session split out of `sendmain` for
+that; on the wire a bus `From:` becomes `"user@hai" <account>` and a
+missing Message-ID is synthesized (Gmail would otherwise assign one
+the log does not know). The crossing log `<mailroot>/.hroutes` (one
+`mid TAB local TAB remote TAB account TAB intent` line per crossing,
+appended and fsynced, last line per id wins) is what threads the two
+worlds and what stops loops: a message whose id is logged has crossed
+already (hai's reply auto-filed into Sent, the bus copy of a phone
+message, everything on a rebuilt index) and is left alone; a reply
+from an address other than the logged correspondent is refused. Like
+`.htags`, never delete it. Tested on a scratch store against a local
+TLS SMTP sink: fresh route, reply, ask/answer, Sent copy, stranger,
+Cc'd question, CRLF/base64/quoted-printable bodies, rebuild. Not yet
+run live end to end (that needs a real mail sent to the route address).
+For main's own questions set hai's `askwait` above the sync interval,
+or the phone answer arrives after main stopped waiting and is dropped.
+
 `hml address` (query.c `addressmain`): To:/Cc: completion for MUAs.
 The FTS table is contentless, so recipients are kept readable in
 `msg.rcpt` (decoded To/Cc/Bcc, added by `ensurecol`; `fillrcpt` in
@@ -290,6 +325,8 @@ sanitizer builds ran clean). Guard every `qsort` on an stb array with
 - `index.c` — `hml new`, `hml tag` and the schema: maildir diff,
   parallel parse, threading, derived tags + overrides, the tag log and
   its replay, config.h rules. `dbopen` is shared with query.c.
+- `gateway.c` — the bus and the outside: routes and reply matching in
+  `hml new`, the outbound copy in `hml send`, the crossing log.
 - `show.c` — `hml show` / `hml reply`: the messages behind a query,
   notmuch text framing, raw/mbox output, part extraction, reply
   templates.
@@ -306,7 +343,7 @@ sanitizer builds ran clean). Guard every `qsort` on an stb array with
 - `config.h` — the account table, included by `hml.c` (other files see it
   through the externs in `hml.h`). `hml.h` — all shared types.
 - Style: clang-format via the repo's `.clang-format` (shared across the
-  siblings: 4-space indent, attached braces, 80 columns) — run
+  siblings: 4-space indent, attached braces, 160 columns) — run
   `clang-format -i` on files you touch. Blocking I/O with one thread per
   account (no event loop, no callbacks) is a deliberate design choice: the
   IMAP conversation must read linearly.

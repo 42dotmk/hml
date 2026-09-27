@@ -53,6 +53,12 @@ typedef struct {
     const char *query; /* applied by `hml new` to newly indexed matches */
 } TagRule;
 
+typedef struct {
+    const char *query; /* selects mail from outside among what `hml new`
+                          indexes; keep a from: term in it */
+    const char *local; /* the bus address it is delivered to */
+} Route;
+
 /* config.h */
 extern const Account accounts[];
 extern const int naccounts;
@@ -65,6 +71,10 @@ extern const FolderTag foldertags[];
 extern const int nfoldertags;
 extern const TagRule tagrules[];
 extern const int ntagrules;
+extern const Route routes[];
+extern const int nroutes;
+extern const char *gateway; /* the bus address the outside talks to (the
+                               user's); "" turns the gateway off */
 
 /* state.c - mbsync's on-disk sync state (.mbsyncstate), kept compatible so
  * mbsync and hml can be used interchangeably on the same store */
@@ -152,6 +162,10 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force);
 
 /* send.c - SMTP submission ("hml send", sendmail-compatible) */
 int sendmain(int argc, char **argv);
+/* one SMTP session through the account: the message as given (Bcc
+ * already stripped), CRLF and dot-stuffing added on the wire */
+int smtpsubmit(const Account *a, const char *envfrom, char **rcpts,
+               const char *msg, size_t n, char *err, size_t errlen);
 
 /* mime.c - the searchable text of one RFC 822 message, and the header/
  * MIME primitives show.c builds on */
@@ -195,6 +209,9 @@ typedef struct {
 
 int mailparse(const char *buf, size_t n, Mail *m);
 void mailfree(Mail *m);
+/* the reader's text: the first text/plain leaf decoded to UTF-8, else
+ * the first text/html stripped to text; malloc'd, "" when neither */
+char *mimeplain(const char *s, size_t n);
 
 /* index.c - the search index ("hml new") and user tags ("hml tag") */
 typedef struct sqlite3 sqlite3;
@@ -202,6 +219,16 @@ typedef struct sqlite3_stmt sqlite3_stmt;
 sqlite3 *dbopen(char *err, size_t errlen);
 int newmain(int argc, char **argv);
 int tagmain(int argc, char **argv);
+
+/* gateway.c - the bus and the outside: routes in `hml new`, the
+ * outbound copy in `hml send`, the crossing log <mailroot>/.hroutes */
+void gwinbound(sqlite3 *db); /* after the rules, before COMMIT */
+/* a message to the gateway address: sent on to the outside party it
+ * answers; 1 sent, 0 not for outside, -1 failed (err) */
+int gwoutbound(const char *msg, size_t n, char *err, size_t errlen);
+int gwlogadd(const char *mid, const char *local, const char *remote,
+             const char *account, const char *intent);
+char *gwid(const char *v); /* the id inside <...>, malloc'd */
 
 /* query.c - notmuch-style query -> SQL; "hml search", "hml count",
  * "hml tags" */

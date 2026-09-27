@@ -229,6 +229,29 @@ before any mail is set up. A message with both local and remote
 recipients is delivered locally first, then submitted. This is hai's
 message bus: `main@hai` is the agent, `user@hai` is you.
 
+### The gateway: the bus from your phone
+
+The local boxes have no server, so mail from outside reaches them
+through an account you already sync. A route in `config.h` names a
+query and a bus address:
+
+```
+{"to:costa+hai@codechem.com and from:me@gmail.com", "main@hai"}
+```
+
+Mail to that plus-address lands in the account on the next `recv`;
+`hml new` finds it among what it just indexed, rewrites it into bus
+form (plain UTF-8, the quoted mail below a reply dropped, Message-ID
+kept) and delivers it to `main@hai`. hai answers `user@hai` as
+always; `hml send` sees that the reply answers something that came
+from outside and mails it on through the account, From
+`"main@hai" <you@gmail.com>`, threaded under your message. A reply
+from your phone comes back the same way, and when hai had asked a
+question it arrives as the answer. Every crossing is one line in
+`~/.mail/.hroutes`, which is how replies find their way and how
+nothing loops; never delete it. Keep a `from:` term in every route:
+whoever matches drives an agent.
+
 ```sh
 printf 'Subject: check the build\n\nhwm fails to link.\n' | hml send main@hai
 hml search to:user@hai tag:unread     # what hai left for you

@@ -22,8 +22,7 @@ typedef struct { /* header block to strip (Bcc, including continuations) */
 } Range;
 
 static void b64(const unsigned char *in, size_t n, char *out) {
-    static const char t[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    static const char t[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     size_t i, o = 0;
 
     for (i = 0; i + 2 < n; i += 3) {
@@ -142,8 +141,7 @@ static int smtpreply(Imap *im, char *err, size_t errlen) {
 }
 
 /* send one command line, expect a reply of the given class (2xx, 3xx) */
-static int smtpcmd(Imap *im, int class, char *err, size_t errlen,
-                   const char *fmt, ...) {
+static int smtpcmd(Imap *im, int class, char *err, size_t errlen, const char *fmt, ...) {
     char cmd[1100];
     va_list ap;
     size_t n;
@@ -182,6 +180,19 @@ static const Account *pickaccount(const char *name, const char *from) {
     return name ? NULL : &accounts[0];
 }
 
+static void wput(char **b, const char *s) {
+    size_t n = strlen(s);
+
+    if (n)
+        memcpy(arraddnptr(*b, n), s, n);
+}
+
+static int rangecmp(const void *a, const void *b) {
+    const Range *x = a, *y = b;
+
+    return x->start < y->start ? -1 : x->start > y->start;
+}
+
 static int fail(const char *what, const char *why) {
     fprintf(stderr, "hml send: %s: %s\n", what, why);
     return 1;
@@ -192,16 +203,13 @@ static int fail(const char *what, const char *why) {
 static int islocal(const char *addr) {
     const char *at = strrchr(addr, '@');
 
-    return at && (!strcasecmp(at + 1, localdomain) ||
-                  !strcasecmp(at + 1, "localhost"));
+    return at && (!strcasecmp(at + 1, localdomain) || !strcasecmp(at + 1, "localhost"));
 }
 
 /* the message, Bcc blocks skipped and CR stripped, into the maildir of
  * the local part; Date and Message-ID are added when missing, and a
  * bare body (no header block at all) gets To: and the blank line */
-static int deliverlocal(const char *msg, size_t msglen, const Range *bcc,
-                        const char *addr, int hasdate, const char *mid,
-                        int hashdrs) {
+static int deliverlocal(const char *msg, size_t msglen, const Range *bcc, const char *addr, int hasdate, const char *mid, int hashdrs) {
     const char *at = strrchr(addr, '@');
     char err[256], root[4096], dir[4160], tmp[4160];
     size_t n = (size_t)(at - addr), o = 0;
@@ -251,17 +259,99 @@ static int deliverlocal(const char *msg, size_t msglen, const Range *bcc,
     return 0;
 }
 
+int smtpsubmit(const Account *a, const char *envfrom, char **rcpts, const char *msg, size_t msglen, char *err, size_t errlen) {
+    char e[256] = "", host[64], auth[600], authb64[820], *pass;
+    Imap *im;
+    size_t o;
+    long i;
+    int rc = -1;
+
+    if (!(pass = runpasscmd(a->passcmd, e, sizeof e))) {
+        snprintf(err, errlen, "password: %s", e);
+        return -1;
+    }
+    if (!(im = tlsconnect(a->smtphost, a->smtpport, e, sizeof e))) {
+        memset(pass, 0, strlen(pass));
+        free(pass);
+        snprintf(err, errlen, "%s: %s", a->smtphost, e);
+        return -1;
+    }
+    if (gethostname(host, sizeof host - 1) < 0)
+        strcpy(host, "localhost");
+    host[sizeof host - 1] = '\0';
+
+    /* \0user\0password, base64-encoded */
+    {
+        size_t ul = strlen(a->user), pl = strlen(pass), n = 0;
+        auth[n++] = '\0';
+        memcpy(auth + n, a->user, ul);
+        n += ul;
+        auth[n++] = '\0';
+        memcpy(auth + n, pass, pl);
+        n += pl;
+        b64((unsigned char *)auth, n, authb64);
+        memset(auth, 0, sizeof auth);
+        memset(pass, 0, pl);
+        free(pass);
+    }
+
+    if (smtpreply(im, e, sizeof e) / 100 != 2) {
+        snprintf(err, errlen, "greeting: %s", e);
+        goto close;
+    }
+    if (smtpcmd(im, 2, e, sizeof e, "EHLO %s", host) < 0 || smtpcmd(im, 2, e, sizeof e, "AUTH PLAIN %s", authb64) < 0) {
+        snprintf(err, errlen, "auth: %s", e);
+        goto close;
+    }
+    memset(authb64, 0, sizeof authb64);
+    if (smtpcmd(im, 2, e, sizeof e, "MAIL FROM:<%s>", envfrom) < 0) {
+        snprintf(err, errlen, "%s: %s", envfrom, e);
+        goto close;
+    }
+    for (i = 0; i < arrlen(rcpts); i++) {
+        if (smtpcmd(im, 2, e, sizeof e, "RCPT TO:<%s>", rcpts[i]) < 0) {
+            snprintf(err, errlen, "%s: %s", rcpts[i], e);
+            goto close;
+        }
+    }
+    if (smtpcmd(im, 3, e, sizeof e, "DATA") < 0) {
+        snprintf(err, errlen, "DATA: %s", e);
+        goto close;
+    }
+    /* the message, CRLF line endings, dot-stuffed */
+    o = 0;
+    while (o < msglen) {
+        const char *nl = memchr(msg + o, '\n', msglen - o);
+        size_t le = nl ? (size_t)(nl - msg) : msglen, l = le - o;
+        if (l && msg[le - 1] == '\r')
+            l--;
+        if ((l && msg[o] == '.' && imapwrite(im, ".", 1) < 0) || imapwrite(im, msg + o, l) < 0 || imapwrite(im, "\r\n", 2) < 0) {
+            snprintf(err, errlen, "write: connection lost");
+            goto close;
+        }
+        o = nl ? le + 1 : msglen;
+    }
+    if (imapwrite(im, ".\r\n", 3) < 0 || smtpreply(im, e, sizeof e) / 100 != 2) {
+        snprintf(err, errlen, "delivery: %s", e[0] ? e : "rejected");
+        goto close;
+    }
+    smtpcmd(im, 2, e, sizeof e, "QUIT");
+    rc = 0;
+close:
+    imapclose(im);
+    return rc;
+}
+
 int sendmain(int argc, char **argv) {
-    char err[256] = "", host[64], auth[600], authb64[820], mid[128];
-    char *msg, *pass, *from = NULL;
+    char err[256] = "", mid[128], *msg, *wire = NULL, *from = NULL;
+    char *midhdr = NULL, *intent = NULL, *buslocal = NULL, *id;
     const char *acctname = NULL, *envfrom = NULL;
     char **rcpts = NULL;
-    Range *bccblk = NULL;
-    const Account *a;
-    Imap *im;
+    Range *bccblk = NULL, fromblk = {0, 0};
+    const Account *a = NULL;
     size_t msglen, o;
     long i, bi = 0;
-    int tflag = 0, rc = 1, hasdate = 0, hasmid = 0, hashdrs = 0;
+    int tflag = 0, rc = 1, hasdate = 0, hasmid = 0, hashdrs = 0, togw = 0;
 
     for (i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "-t")) {
@@ -306,10 +396,18 @@ int sendmain(int argc, char **argv) {
             char *v;
             if (nlen == 4 && !strncasecmp(msg + ls, "date", 4))
                 hasdate = 1;
-            else if (nlen == 10 && !strncasecmp(msg + ls, "message-id", 10))
+            else if (nlen == 10 && !strncasecmp(msg + ls, "message-id", 10)) {
                 hasmid = 1;
+                if (!midhdr)
+                    midhdr = hdrvalue(msg, vs, be);
+            } else if (nlen == 10 && !strncasecmp(msg + ls, "hai-intent", 10)) {
+                if (!intent)
+                    intent = hdrvalue(msg, vs, be);
+            }
             if (nlen == 4 && !strncasecmp(msg + ls, "from", 4) && !from) {
                 char **one = NULL;
+                fromblk.start = ls;
+                fromblk.end = be;
                 if ((v = hdrvalue(msg, vs, be))) {
                     addrsplit(v, &one);
                     free(v);
@@ -319,9 +417,7 @@ int sendmain(int argc, char **argv) {
                 for (i = 1; i < arrlen(one); i++)
                     free(one[i]);
                 arrfree(one);
-            } else if (tflag &&
-                       ((nlen == 2 && !strncasecmp(msg + ls, "to", 2)) ||
-                        (nlen == 2 && !strncasecmp(msg + ls, "cc", 2)))) {
+            } else if (tflag && ((nlen == 2 && !strncasecmp(msg + ls, "to", 2)) || (nlen == 2 && !strncasecmp(msg + ls, "cc", 2)))) {
                 if ((v = hdrvalue(msg, vs, be))) {
                     addrsplit(v, &rcpts);
                     free(v);
@@ -345,122 +441,90 @@ int sendmain(int argc, char **argv) {
         goto out;
     }
     /* local recipients first (no network to fail), then the rest by SMTP;
-     * one synthesized Message-ID is shared by every local copy */
+     * one synthesized Message-ID is shared by every copy */
     if (!hasmid)
-        snprintf(mid, sizeof mid, "<%ld.%d@%s>", (long)time(NULL),
-                 (int)getpid(), localdomain);
+        snprintf(mid, sizeof mid, "<%ld.%d@%s>", (long)time(NULL), (int)getpid(), localdomain);
+    if (from && islocal(from) && strcasecmp(from, gateway))
+        buslocal = strdup(from);
     for (i = 0; i < arrlen(rcpts);) {
         if (!islocal(rcpts[i])) {
             i++;
             continue;
         }
-        if (deliverlocal(msg, msglen, bccblk, rcpts[i], hasdate,
-                         hasmid ? NULL : mid, hashdrs) != 0)
+        if (deliverlocal(msg, msglen, bccblk, rcpts[i], hasdate, hasmid ? NULL : mid, hashdrs) != 0)
             goto out;
+        if (!strcasecmp(rcpts[i], gateway))
+            togw = 1;
+        else if (!buslocal)
+            buslocal = strdup(rcpts[i]);
         free(rcpts[i]);
         arrdel(rcpts, i);
     }
+    if (arrlen(rcpts) && !(a = pickaccount(acctname, from))) {
+        rc = fail("account", "no such account");
+        goto out;
+    }
+    /* what goes on the wire: Bcc blocks out, the synthesized id in, and
+     * a bus sender shown in the account's name (the outside would not
+     * accept From: user@hai) */
+    if (!hasmid && hashdrs) {
+        wput(&wire, "Message-ID: ");
+        wput(&wire, mid);
+        wput(&wire, "\n");
+    }
+    if (a && from && islocal(from) && fromblk.end) {
+        wput(&wire, "From: \"");
+        wput(&wire, from);
+        wput(&wire, "\" <");
+        wput(&wire, a->user);
+        wput(&wire, ">\n");
+        arrput(bccblk, fromblk); /* the original: skipped like a Bcc block */
+        if (arrlen(bccblk) > 1)
+            qsort(bccblk, arrlenu(bccblk), sizeof *bccblk, rangecmp);
+    }
+    for (o = 0; o < msglen;) {
+        size_t end = bi < arrlen(bccblk) ? bccblk[bi].start : msglen;
+        if (end > o)
+            memcpy(arraddnptr(wire, end - o), msg + o, end - o);
+        if (bi < arrlen(bccblk)) {
+            o = bccblk[bi].end;
+            bi++;
+        } else
+            o = msglen;
+    }
+    /* the bus answering the outside: a message to the gateway address
+     * that replies to something that crossed goes out too */
+    if (togw && gateway[0] && hashdrs && gwoutbound(wire, arrlenu(wire), err, sizeof err) < 0)
+        fprintf(stderr, "hml send: gateway: %s\n", err);
     if (!arrlen(rcpts)) {
         rc = 0;
         goto out;
     }
-    if (!(a = pickaccount(acctname, from))) {
-        rc = fail("account", "no such account");
-        goto out;
-    }
     if (!envfrom)
-        envfrom = from ? from : a->user;
-
-    if (!(pass = runpasscmd(a->passcmd, err, sizeof err))) {
-        rc = fail("password", err);
+        envfrom = from && !islocal(from) ? from : a->user;
+    if (smtpsubmit(a, envfrom, rcpts, wire, arrlenu(wire), err, sizeof err) < 0) {
+        fprintf(stderr, "hml send: %s\n", err);
         goto out;
     }
-    if (!(im = tlsconnect(a->smtphost, a->smtpport, err, sizeof err))) {
-        memset(pass, 0, strlen(pass));
-        free(pass);
-        rc = fail(a->smtphost, err);
-        goto out;
+    /* a bus message with an outside recipient as well: replies from
+     * there come back to the bus address */
+    if (buslocal && gateway[0] && hashdrs) {
+        id = gwid(midhdr ? midhdr : mid);
+        if (gwlogadd(id, buslocal, rcpts[0], a->name, intent ? intent : "") < 0)
+            fprintf(stderr, "hml send: gateway: cannot log %s\n", id);
+        free(id);
     }
-    if (gethostname(host, sizeof host - 1) < 0)
-        strcpy(host, "localhost");
-    host[sizeof host - 1] = '\0';
-
-    /* \0user\0password, base64-encoded */
-    {
-        size_t ul = strlen(a->user), pl = strlen(pass), n = 0;
-        auth[n++] = '\0';
-        memcpy(auth + n, a->user, ul);
-        n += ul;
-        auth[n++] = '\0';
-        memcpy(auth + n, pass, pl);
-        n += pl;
-        b64((unsigned char *)auth, n, authb64);
-        memset(auth, 0, sizeof auth);
-        memset(pass, 0, pl);
-        free(pass);
-    }
-
-    if (smtpreply(im, err, sizeof err) / 100 != 2) {
-        rc = fail("greeting", err);
-        goto close;
-    }
-    if (smtpcmd(im, 2, err, sizeof err, "EHLO %s", host) < 0 ||
-        smtpcmd(im, 2, err, sizeof err, "AUTH PLAIN %s", authb64) < 0) {
-        rc = fail("auth", err);
-        goto close;
-    }
-    memset(authb64, 0, sizeof authb64);
-    if (smtpcmd(im, 2, err, sizeof err, "MAIL FROM:<%s>", envfrom) < 0) {
-        rc = fail(envfrom, err);
-        goto close;
-    }
-    for (i = 0; i < arrlen(rcpts); i++) {
-        if (smtpcmd(im, 2, err, sizeof err, "RCPT TO:<%s>", rcpts[i]) < 0) {
-            rc = fail(rcpts[i], err);
-            goto close;
-        }
-    }
-    if (smtpcmd(im, 3, err, sizeof err, "DATA") < 0) {
-        rc = fail("DATA", err);
-        goto close;
-    }
-    /* the message, CRLF line endings, dot-stuffed, Bcc stripped under -t */
-    o = 0;
-    while (o < msglen) {
-        const char *nl;
-        size_t le, l;
-        if (bi < arrlen(bccblk) && o == bccblk[bi].start) {
-            o = bccblk[bi].end;
-            bi++;
-            continue;
-        }
-        nl = memchr(msg + o, '\n', msglen - o);
-        le = nl ? (size_t)(nl - msg) : msglen;
-        l = le - o;
-        if (l && msg[le - 1] == '\r')
-            l--;
-        if ((l && msg[o] == '.' && imapwrite(im, ".", 1) < 0) ||
-            imapwrite(im, msg + o, l) < 0 || imapwrite(im, "\r\n", 2) < 0) {
-            rc = fail("write", "connection lost");
-            goto close;
-        }
-        o = nl ? le + 1 : msglen;
-    }
-    if (imapwrite(im, ".\r\n", 3) < 0 ||
-        smtpreply(im, err, sizeof err) / 100 != 2) {
-        rc = fail("delivery", err[0] ? err : "rejected");
-        goto close;
-    }
-    smtpcmd(im, 2, err, sizeof err, "QUIT");
     rc = 0;
 
-close:
-    imapclose(im);
 out:
     for (i = 0; i < arrlen(rcpts); i++)
         free(rcpts[i]);
     arrfree(rcpts);
     arrfree(bccblk);
+    arrfree(wire);
+    free(buslocal);
+    free(midhdr);
+    free(intent);
     free(from);
     free(msg);
     if (rc == 0 && postsend[0] && system(postsend) != 0)

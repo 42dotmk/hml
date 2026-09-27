@@ -13,14 +13,13 @@ static const Channel gmail[] = {
 
 const Account accounts[] = {
     {"cc", "imap.gmail.com", 993, "smtp.gmail.com", 465, "costa@codechem.com",
-     "gpg -q --for-your-eyes-only --no-tty -d " "~/.password-store/costa@halicea.com.gpg", 
+     "gpg -q --for-your-eyes-only --no-tty -d "
+     "~/.password-store/costa@halicea.com.gpg",
      "~/.mail/cc", gmail, LEN(gmail)},
-    {"km", "imap.gmail.com", 993, "smtp.gmail.com", 465, "kosta.mihajlov@gmail.com", 
-     "gpg -q --for-your-eyes-only --no-tty -d ~/.password-store/kosta.mihajlov@gmail.com.gpg", 
-     "~/.mail/km", gmail, LEN(gmail)},
-    {"chgm", "imap.gmail.com", 993, "smtp.gmail.com", 465, "costa.halicea@gmail.com", 
-     "gpg -q --for-your-eyes-only --no-tty -d ~/.password-store/costa.halicea@gmail.com.gpg",
-     "~/.mail/chgm", gmail, LEN(gmail)},
+    {"km", "imap.gmail.com", 993, "smtp.gmail.com", 465, "kosta.mihajlov@gmail.com",
+     "gpg -q --for-your-eyes-only --no-tty -d ~/.password-store/kosta.mihajlov@gmail.com.gpg", "~/.mail/km", gmail, LEN(gmail)},
+    {"chgm", "imap.gmail.com", 993, "smtp.gmail.com", 465, "costa.halicea@gmail.com",
+     "gpg -q --for-your-eyes-only --no-tty -d ~/.password-store/costa.halicea@gmail.com.gpg", "~/.mail/chgm", gmail, LEN(gmail)},
 };
 const int naccounts = LEN(accounts);
 
@@ -86,3 +85,18 @@ const TagRule tagrules[] = {
     {"+bank -inbox", "from:kb.com.mk"},
 };
 const int ntagrules = LEN(tagrules);
+
+/* gateway: the bus reaches the outside through the accounts. Inbound,
+ * `hml new` delivers to a route's local address every message it
+ * indexes from an account box that matches the route's query, and to
+ * the bus address that sent it every reply to something that crossed
+ * before (stamped Hai-Intent: answer when that was hai's question).
+ * Outbound, `hml send` mails a message for gateway (the user's bus
+ * address) on to the outside party it answers, From the account. The
+ * crossings live in <mailroot>/.hroutes; never delete it. Whoever
+ * matches a route drives an agent, so keep its from: term tight. */
+const Route routes[] = {
+    {"to:costa+hai@codechem.com and (from:costa@codechem.com or from:kosta.mihajlov@gmail.com or from:costa.halicea@gmail.com)", "main@hai"},
+};
+const int nroutes = LEN(routes);
+const char *gateway = "user@hai";
