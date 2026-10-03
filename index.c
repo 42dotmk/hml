@@ -53,7 +53,7 @@ static const char *schema = "PRAGMA journal_mode=WAL;"
                             " tokenize='unicode61 remove_diacritics 2');";
 
 /* one code point as UTF-8, appended */
-static void putcp(char *out, size_t cap, unsigned cp) {
+static void append_codepoint(char *out, size_t cap, unsigned cp) {
     size_t n = strlen(out);
     char u[5] = {0};
 
@@ -75,7 +75,7 @@ static void putcp(char *out, size_t cap, unsigned cp) {
  * the attachment-name tokens, so "every message with an attach token" is
  * one prefix query over every initial letter/digit the tokenizer can
  * produce (Latin, digits, Cyrillic, Greek — diacritics are folded). */
-static int readfile(const char *path, char **buf, size_t *len);
+static int read_file(const char *path, char **buf, size_t *len);
 
 /* the refinement: the FTS backfill marks every message with a *named*
  * part, which includes the Content-ID logos of every newsletter; only a
@@ -94,7 +94,7 @@ static struct {
     pthread_mutex_t mtx;
 } refine_q = {NULL, 0, PTHREAD_MUTEX_INITIALIZER};
 
-static void *refiner(void *arg) {
+static void *refine_worker(void *arg) {
     (void)arg;
     for (;;) {
         char *buf;
@@ -106,13 +106,13 @@ static void *refiner(void *arg) {
         pthread_mutex_unlock(&refine_q.mtx);
         if (i >= arrlen(refine_q.c))
             return NULL;
-        if (readfile(refine_q.c[i].path, &buf, &len) < 0) {
+        if (read_file(refine_q.c[i].path, &buf, &len) < 0) {
             refine_q.c[i].keep = refine_q.c[i].marked; /* gone: no opinion */
             continue;
         }
-        mailparse(buf, len, &m);
+        mail_parse(buf, len, &m);
         refine_q.c[i].keep = m.hasatt;
-        mailfree(&m);
+        mail_free(&m);
         free(buf);
     }
 }
@@ -134,8 +134,8 @@ static void refine(sqlite3 *db) {
                        -1, &st, NULL);
     while (sqlite3_step(st) == SQLITE_ROW) {
         Cand c = {sqlite3_column_int64(st, 0), NULL, 0, sqlite3_column_int(st, 4)};
-        if (!filepath((const char *)sqlite3_column_text(st, 1), (const char *)sqlite3_column_text(st, 2), (const char *)sqlite3_column_text(st, 3), path,
-                      sizeof path))
+        if (!file_path((const char *)sqlite3_column_text(st, 1), (const char *)sqlite3_column_text(st, 2), (const char *)sqlite3_column_text(st, 3), path,
+                       sizeof path))
             continue;
         c.path = strdup(path);
         arrput(refine_q.c, c);
@@ -149,7 +149,7 @@ static void refine(sqlite3 *db) {
     if (n > arrlen(refine_q.c))
         n = arrlen(refine_q.c);
     for (i = 0; i < n; i++)
-        pthread_create(&tid[i], NULL, refiner, NULL);
+        pthread_create(&tid[i], NULL, refine_worker, NULL);
     for (i = 0; i < n; i++)
         pthread_join(tid[i], NULL);
     /* a message is an attachment carrier if ANY of its files is; set the
@@ -215,8 +215,8 @@ static void refine(sqlite3 *db) {
  * msg.intent (hai's session messages): no backfill, the boxes that carry
  * it did not exist before the column. msg.rcpt (To/Cc/Bcc, decoded, for
  * hml address; the FTS copy is contentless): Sent mail is backfilled once
- * by hml new (fillrcpt), everything newer arrives with it. */
-static void ensurecol(sqlite3 *db, const char *name) {
+ * by hml new (backfill_recipients), everything newer arrives with it. */
+static void ensure_column(sqlite3 *db, const char *name) {
     sqlite3_stmt *st;
     char q[128];
     int have = 0;
@@ -260,7 +260,7 @@ static void migrate(sqlite3 *db) {
         if (strlen(q) + 16 >= sizeof q)
             break;
         strcat(q, first ? "" : " OR ");
-        putcp(q, sizeof q, cp);
+        append_codepoint(q, sizeof q, cp);
         strcat(q, "*");
         first = 0;
     }
@@ -286,12 +286,12 @@ static void migrate(sqlite3 *db) {
                  NULL, NULL, NULL);
 }
 
-sqlite3 *dbopen(char *err, size_t errlen) {
+sqlite3 *db_open(char *err, size_t errlen) {
     char path[4096], *e = NULL;
     sqlite3 *db;
     size_t n;
 
-    expand(mailroot, path, sizeof path);
+    expand_home(mailroot, path, sizeof path);
     n = strlen(path);
     snprintf(path + n, sizeof path - n, "/.hml.db");
     if (sqlite3_open(path, &db) != SQLITE_OK) {
@@ -307,8 +307,8 @@ sqlite3 *dbopen(char *err, size_t errlen) {
         return NULL;
     }
     migrate(db);
-    ensurecol(db, "intent");
-    ensurecol(db, "rcpt");
+    ensure_column(db, "intent");
+    ensure_column(db, "rcpt");
     return db;
 }
 
@@ -329,7 +329,7 @@ static void die(Db *d, const char *what) {
     exit(2);
 }
 
-static sqlite3_stmt *prep(Db *d, const char *sql) {
+static sqlite3_stmt *prepare_statement(Db *d, const char *sql) {
     sqlite3_stmt *st;
 
     if (sqlite3_prepare_v2(d->db, sql, -1, &st, NULL) != SQLITE_OK)
@@ -337,46 +337,46 @@ static sqlite3_stmt *prep(Db *d, const char *sql) {
     return st;
 }
 
-static void prepall(Db *d) {
-    d->msgbymid = prep(d, "SELECT id FROM msg WHERE mid=?");
-    d->insmsg = prep(d, "INSERT INTO msg(mid,thread,date,subject,sender,"
-                        "attach,intent,rcpt) VALUES(?,?,?,?,?,?,?,?)");
-    d->attachof = prep(d, "SELECT attach FROM msg WHERE id=?");
-    d->intentof = prep(d, "SELECT intent FROM msg WHERE id=?");
-    d->setattach = prep(d, "UPDATE msg SET attach=1 WHERE id=? AND attach=0");
-    d->setthread = prep(d, "UPDATE msg SET thread=? WHERE id=?");
-    d->merge = prep(d, "UPDATE msg SET thread=? WHERE thread=?");
-    d->insfts = prep(d, "INSERT INTO fts(rowid,subject,sender,rcpt,attach,"
-                        "body) VALUES(?,?,?,?,?,?)");
-    d->delfts = prep(d, "DELETE FROM fts WHERE rowid=?");
-    d->insref = prep(d, "INSERT INTO ref(msg,mid) VALUES(?,?)");
-    d->delref = prep(d, "DELETE FROM ref WHERE msg=?");
-    d->insfile = prep(d, "INSERT OR REPLACE INTO file(box,base,sub,name,flags,"
-                         "msg) VALUES(?,?,?,?,?,?)");
-    d->mvfile = prep(d, "UPDATE file SET sub=?,name=?,flags=? WHERE box=? AND base=?");
-    d->delfile = prep(d, "DELETE FROM file WHERE box=? AND base=?");
-    d->filemsg = prep(d, "SELECT msg FROM file WHERE box=? AND base=?");
-    d->nfiles = prep(d, "SELECT COUNT(*) FROM file WHERE msg=?");
-    d->delmsg = prep(d, "DELETE FROM msg WHERE id=?");
-    d->deltag = prep(d, "DELETE FROM tag WHERE msg=?");
-    d->instag = prep(d, "INSERT OR IGNORE INTO tag(msg,name) VALUES(?,?)");
-    d->msgfiles = prep(d, "SELECT box,flags FROM file WHERE msg=?");
-    d->boxfiles = prep(d, "SELECT base,sub,name,flags,msg FROM file WHERE box=?");
-    d->dirget = prep(d, "SELECT mtime FROM dir WHERE path=?");
-    d->dirset = prep(d, "INSERT OR REPLACE INTO dir(path,mtime) VALUES(?,?)");
-    d->midof = prep(d, "SELECT mid FROM msg WHERE id=?");
-    d->utagget = prep(d, "SELECT name,val FROM utag WHERE mid=?");
-    d->utagset = prep(d, "INSERT OR REPLACE INTO utag(mid,name,val) VALUES(?,?,?)");
-    d->utagdel = prep(d, "DELETE FROM utag WHERE mid=? AND name=?");
-    d->filesof = prep(d, "SELECT box,base,sub,name,flags FROM file WHERE msg=?");
-    d->metaget = prep(d, "SELECT val FROM meta WHERE key=?");
-    d->metaset = prep(d, "INSERT OR REPLACE INTO meta(key,val) VALUES(?,?)");
-    d->insnew = prep(d, "INSERT OR IGNORE INTO newmsg(id) VALUES(?)");
+static void prepare_statements(Db *d) {
+    d->msgbymid = prepare_statement(d, "SELECT id FROM msg WHERE mid=?");
+    d->insmsg = prepare_statement(d, "INSERT INTO msg(mid,thread,date,subject,sender,"
+                                     "attach,intent,rcpt) VALUES(?,?,?,?,?,?,?,?)");
+    d->attachof = prepare_statement(d, "SELECT attach FROM msg WHERE id=?");
+    d->intentof = prepare_statement(d, "SELECT intent FROM msg WHERE id=?");
+    d->setattach = prepare_statement(d, "UPDATE msg SET attach=1 WHERE id=? AND attach=0");
+    d->setthread = prepare_statement(d, "UPDATE msg SET thread=? WHERE id=?");
+    d->merge = prepare_statement(d, "UPDATE msg SET thread=? WHERE thread=?");
+    d->insfts = prepare_statement(d, "INSERT INTO fts(rowid,subject,sender,rcpt,attach,"
+                                     "body) VALUES(?,?,?,?,?,?)");
+    d->delfts = prepare_statement(d, "DELETE FROM fts WHERE rowid=?");
+    d->insref = prepare_statement(d, "INSERT INTO ref(msg,mid) VALUES(?,?)");
+    d->delref = prepare_statement(d, "DELETE FROM ref WHERE msg=?");
+    d->insfile = prepare_statement(d, "INSERT OR REPLACE INTO file(box,base,sub,name,flags,"
+                                      "msg) VALUES(?,?,?,?,?,?)");
+    d->mvfile = prepare_statement(d, "UPDATE file SET sub=?,name=?,flags=? WHERE box=? AND base=?");
+    d->delfile = prepare_statement(d, "DELETE FROM file WHERE box=? AND base=?");
+    d->filemsg = prepare_statement(d, "SELECT msg FROM file WHERE box=? AND base=?");
+    d->nfiles = prepare_statement(d, "SELECT COUNT(*) FROM file WHERE msg=?");
+    d->delmsg = prepare_statement(d, "DELETE FROM msg WHERE id=?");
+    d->deltag = prepare_statement(d, "DELETE FROM tag WHERE msg=?");
+    d->instag = prepare_statement(d, "INSERT OR IGNORE INTO tag(msg,name) VALUES(?,?)");
+    d->msgfiles = prepare_statement(d, "SELECT box,flags FROM file WHERE msg=?");
+    d->boxfiles = prepare_statement(d, "SELECT base,sub,name,flags,msg FROM file WHERE box=?");
+    d->dirget = prepare_statement(d, "SELECT mtime FROM dir WHERE path=?");
+    d->dirset = prepare_statement(d, "INSERT OR REPLACE INTO dir(path,mtime) VALUES(?,?)");
+    d->midof = prepare_statement(d, "SELECT mid FROM msg WHERE id=?");
+    d->utagget = prepare_statement(d, "SELECT name,val FROM utag WHERE mid=?");
+    d->utagset = prepare_statement(d, "INSERT OR REPLACE INTO utag(mid,name,val) VALUES(?,?,?)");
+    d->utagdel = prepare_statement(d, "DELETE FROM utag WHERE mid=? AND name=?");
+    d->filesof = prepare_statement(d, "SELECT box,base,sub,name,flags FROM file WHERE msg=?");
+    d->metaget = prepare_statement(d, "SELECT val FROM meta WHERE key=?");
+    d->metaset = prepare_statement(d, "INSERT OR REPLACE INTO meta(key,val) VALUES(?,?)");
+    d->insnew = prepare_statement(d, "INSERT OR IGNORE INTO newmsg(id) VALUES(?)");
 }
 
 /* run a statement to completion; returns the first column of the first
  * row as an integer, or -1 when there is no row */
-static sqlite3_int64 step1(Db *d, sqlite3_stmt *st) {
+static sqlite3_int64 step_integer(Db *d, sqlite3_stmt *st) {
     sqlite3_int64 r = -1;
     int rc = sqlite3_step(st);
 
@@ -388,11 +388,11 @@ static sqlite3_int64 step1(Db *d, sqlite3_stmt *st) {
     return r;
 }
 
-static void bindtext(sqlite3_stmt *st, int i, const char *s) { sqlite3_bind_text(st, i, s, -1, SQLITE_TRANSIENT); }
+static void bind_text(sqlite3_stmt *st, int i, const char *s) { sqlite3_bind_text(st, i, s, -1, SQLITE_TRANSIENT); }
 
-static void sadd(char **s, const char *t) { memcpy(arraddnptr(*s, strlen(t)), t, strlen(t)); }
+static void append_string(char **s, const char *t) { memcpy(arraddnptr(*s, strlen(t)), t, strlen(t)); }
 
-static void exec(Db *d, const char *sql) {
+static void execute_sql(Db *d, const char *sql) {
     if (sqlite3_exec(d->db, sql, NULL, NULL, NULL) != SQLITE_OK)
         die(d, sql);
 }
@@ -443,7 +443,7 @@ static void retag(Db *d, sqlite3_int64 id) {
     if (strchr(flags, 'T'))
         tags[nt++] = strdup("deleted");
     sqlite3_bind_int64(d->attachof, 1, id);
-    if (step1(d, d->attachof) > 0)
+    if (step_integer(d, d->attachof) > 0)
         tags[nt++] = strdup("attachment");
     sqlite3_reset(d->attachof);
     /* a hai session message: hai:<intent>, so the plumbing can be hidden */
@@ -463,7 +463,7 @@ static void retag(Db *d, sqlite3_int64 id) {
         mid = strdup((const char *)sqlite3_column_text(d->midof, 0));
     sqlite3_reset(d->midof);
     if (mid) {
-        bindtext(d->utagget, 1, mid);
+        bind_text(d->utagget, 1, mid);
         while ((rc = sqlite3_step(d->utagget)) == SQLITE_ROW) {
             const char *name = (const char *)sqlite3_column_text(d->utagget, 0);
             int on = sqlite3_column_int(d->utagget, 1);
@@ -483,11 +483,11 @@ static void retag(Db *d, sqlite3_int64 id) {
         free(mid);
     }
     sqlite3_bind_int64(d->deltag, 1, id);
-    step1(d, d->deltag);
+    step_integer(d, d->deltag);
     for (i = 0; i < nt; i++) {
         sqlite3_bind_int64(d->instag, 1, id);
-        bindtext(d->instag, 2, tags[i]);
-        step1(d, d->instag);
+        bind_text(d->instag, 2, tags[i]);
+        step_integer(d, d->instag);
         free(tags[i]);
     }
 }
@@ -500,7 +500,7 @@ typedef struct {
 } Op;
 
 /* "+a -b ..." (space, tab or argv-separated) -> ops; -1 on a bad token */
-static int parseops(const char *spec, Op **ops) {
+static int parse_tag_ops(const char *spec, Op **ops) {
     const char *p = spec, *e;
     Op o;
 
@@ -522,7 +522,7 @@ static int parseops(const char *spec, Op **ops) {
     }
 }
 
-static void freeops(Op *ops) {
+static void free_tag_ops(Op *ops) {
     ptrdiff_t i;
 
     for (i = 0; i < arrlen(ops); i++)
@@ -534,7 +534,7 @@ static void freeops(Op *ops) {
  * replied, passed. They are never overrides — `hml tag` renames the
  * files instead, so the tag, the flag and (after `hml recv`) the server
  * all agree. Returns the flag bit, 0 for an ordinary tag. */
-static unsigned flagof(const char *name, int *inverted) {
+static unsigned flag_of_tag(const char *name, int *inverted) {
     *inverted = 0;
     if (!strcmp(name, "unread")) {
         *inverted = 1;
@@ -553,7 +553,7 @@ static unsigned flagof(const char *name, int *inverted) {
  * reader of the files - hai skipping a deleted turn - sees it without
  * the index, and `hml recv` expunges it. On an account it stays an
  * override: a T there would reach the server and its expunge */
-static int localrow(const char *box) {
+static int is_local_box(const char *box) {
     size_t n = strlen(localdomain);
     return !strncmp(box, localdomain, n) && box[n] == '/';
 }
@@ -561,7 +561,7 @@ static int localrow(const char *box) {
 /* apply the flag ops to every file of a message: rename in the maildir
  * (seen mail graduates new/ -> cur/), mirror the row, drop any stale
  * override of the same name, then recompute the tags */
-static void mirrorflags(Db *d, sqlite3_int64 id, const char *mid, const Op *ops) {
+static void mirror_flags(Db *d, sqlite3_int64 id, const char *mid, const Op *ops) {
     typedef struct {
         char *box, *base, *sub, *name, *flags;
     } Row;
@@ -582,12 +582,12 @@ static void mirrorflags(Db *d, sqlite3_int64 id, const char *mid, const Op *ops)
         die(d, "filesof");
     sqlite3_reset(d->filesof);
     for (i = 0; i < arrlen(rows); i++) {
-        unsigned f = letterflags(rows[i].flags), nf = f, bit;
+        unsigned f = flags_from_letters(rows[i].flags), nf = f, bit;
         char boxdir[4160], name[512], fl[8], err[256];
         Local m;
         for (k = 0; k < arrlen(ops); k++) {
             inv = 0;
-            if (!(bit = flagof(ops[k].name, &inv)) && (strcmp(ops[k].name, "deleted") || !localrow(rows[i].box)))
+            if (!(bit = flag_of_tag(ops[k].name, &inv)) && (strcmp(ops[k].name, "deleted") || !is_local_box(rows[i].box)))
                 continue;
             if (!bit)
                 bit = FDeleted;
@@ -596,33 +596,33 @@ static void mirrorflags(Db *d, sqlite3_int64 id, const char *mid, const Op *ops)
             else
                 nf &= ~bit;
         }
-        if (nf == f || !boxroot(rows[i].box, boxdir, sizeof boxdir))
+        if (nf == f || !box_directory(rows[i].box, boxdir, sizeof boxdir))
             continue;
         m.uid = 0;
         m.flags = f;
         m.name = rows[i].name;
         m.indir = !strcmp(rows[i].sub, "new");
-        if (mdsetflags(boxdir, &m, nf, err, sizeof err) < 0) {
+        if (maildir_set_flags(boxdir, &m, nf, err, sizeof err) < 0) {
             fprintf(stderr, "hml %s: %s/%s: %s\n", cmdname, rows[i].box, rows[i].name, err);
             continue;
         }
-        /* the row follows the rename: the same name mdsetflags built */
-        flagletters(nf, fl);
+        /* the row follows the rename: the same name maildir_set_flags built */
+        flags_to_letters(nf, fl);
         snprintf(name, sizeof name, "%.*s:2,%s", (int)(strstr(rows[i].name, ":2,") ? strstr(rows[i].name, ":2,") - rows[i].name : (long)strlen(rows[i].name)),
                  rows[i].name, fl);
-        bindtext(d->mvfile, 1, (nf & FSeen) ? "cur" : rows[i].sub);
-        bindtext(d->mvfile, 2, name);
-        bindtext(d->mvfile, 3, fl);
-        bindtext(d->mvfile, 4, rows[i].box);
-        bindtext(d->mvfile, 5, rows[i].base);
-        step1(d, d->mvfile);
+        bind_text(d->mvfile, 1, (nf & FSeen) ? "cur" : rows[i].sub);
+        bind_text(d->mvfile, 2, name);
+        bind_text(d->mvfile, 3, fl);
+        bind_text(d->mvfile, 4, rows[i].box);
+        bind_text(d->mvfile, 5, rows[i].base);
+        step_integer(d, d->mvfile);
     }
     for (k = 0; k < arrlen(ops); k++) { /* a flag is never an override */
-        if (!flagof(ops[k].name, &inv))
+        if (!flag_of_tag(ops[k].name, &inv))
             continue; /* deleted: an override as well */
-        bindtext(d->utagdel, 1, mid);
-        bindtext(d->utagdel, 2, ops[k].name);
-        step1(d, d->utagdel);
+        bind_text(d->utagdel, 1, mid);
+        bind_text(d->utagdel, 2, ops[k].name);
+        step_integer(d, d->utagdel);
     }
     for (i = 0; i < arrlen(rows); i++) {
         free(rows[i].box);
@@ -637,53 +637,53 @@ static void mirrorflags(Db *d, sqlite3_int64 id, const char *mid, const Op *ops)
 
 /* record the overrides for one message and refresh its tags if indexed;
  * flag tags are skipped here (they are files, not overrides — see
- * mirrorflags), which also makes old log lines naming them inert */
-static void applyops(Db *d, const char *mid, const Op *ops) {
+ * mirror_flags), which also makes old log lines naming them inert */
+static void apply_tag_ops(Db *d, const char *mid, const Op *ops) {
     ptrdiff_t i;
     sqlite3_int64 id;
     int inv;
 
     for (i = 0; i < arrlen(ops); i++) {
-        if (flagof(ops[i].name, &inv))
+        if (flag_of_tag(ops[i].name, &inv))
             continue;
-        bindtext(d->utagset, 1, mid);
-        bindtext(d->utagset, 2, ops[i].name);
+        bind_text(d->utagset, 1, mid);
+        bind_text(d->utagset, 2, ops[i].name);
         sqlite3_bind_int(d->utagset, 3, ops[i].on);
-        step1(d, d->utagset);
+        step_integer(d, d->utagset);
     }
-    bindtext(d->msgbymid, 1, mid);
-    if ((id = step1(d, d->msgbymid)) >= 0)
+    bind_text(d->msgbymid, 1, mid);
+    if ((id = step_integer(d, d->msgbymid)) >= 0)
         retag(d, id);
 }
 
-static void taglogpath(char *dst, size_t cap) {
+static void tag_log_path(char *dst, size_t cap) {
     size_t n;
 
-    expand(mailroot, dst, cap);
+    expand_home(mailroot, dst, cap);
     n = strlen(dst);
     snprintf(dst + n, cap - n, "/.htags");
 }
 
 /* one log line per message: mid TAB +a TAB -b */
-static void logline(char **buf, const char *mid, const Op *ops) {
+static void tag_log_line(char **buf, const char *mid, const Op *ops) {
     ptrdiff_t i;
 
-    sadd(buf, mid);
+    append_string(buf, mid);
     for (i = 0; i < arrlen(ops); i++) {
-        sadd(buf, ops[i].on ? "\t+" : "\t-");
-        sadd(buf, ops[i].name);
+        append_string(buf, ops[i].on ? "\t+" : "\t-");
+        append_string(buf, ops[i].name);
     }
-    sadd(buf, "\n");
+    append_string(buf, "\n");
 }
 
 /* append lines to the log, durably; returns the log size afterwards, or
  * -1. Callers hold the database write lock, which serializes writers */
-static long taglogappend(const char *buf, size_t n) {
+static long tag_log_append(const char *buf, size_t n) {
     char path[4096];
     int fd;
     long size;
 
-    taglogpath(path, sizeof path);
+    tag_log_path(path, sizeof path);
     if ((fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0600)) < 0)
         return -1;
     while (n) {
@@ -701,66 +701,66 @@ static long taglogappend(const char *buf, size_t n) {
     return size;
 }
 
-static long metaint(Db *d, const char *key) {
+static long meta_get(Db *d, const char *key) {
     long v;
 
-    bindtext(d->metaget, 1, key);
-    v = (long)step1(d, d->metaget);
+    bind_text(d->metaget, 1, key);
+    v = (long)step_integer(d, d->metaget);
     return v < 0 ? 0 : v;
 }
 
-static void metaset(Db *d, const char *key, long v) {
-    bindtext(d->metaset, 1, key);
+static void meta_set(Db *d, const char *key, long v) {
+    bind_text(d->metaset, 1, key);
     sqlite3_bind_int64(d->metaset, 2, v);
-    step1(d, d->metaset);
+    step_integer(d, d->metaset);
 }
 
 /* msg.rcpt for mail indexed before the column existed, once: only what we
  * sent (a few thousand files), since those recipients are the ones hml
  * address ranks first; received mail's Cc lists fill in as it arrives */
-static void fillrcpt(Db *d) {
+static void backfill_recipients(Db *d) {
     sqlite3_stmt *st, *set;
     char path[4608], *buf;
     size_t len;
     long n = 0;
     Mail m;
 
-    if (metaint(d, "rcptfill"))
+    if (meta_get(d, "rcptfill"))
         return;
-    st = prep(d, "SELECT msg.id,file.box,file.sub,file.name FROM msg JOIN"
-                 " file ON file.msg=msg.id WHERE msg.rcpt='' AND msg.id IN"
-                 " (SELECT msg FROM tag WHERE name='sent') GROUP BY msg.id");
-    set = prep(d, "UPDATE msg SET rcpt=? WHERE id=?");
+    st = prepare_statement(d, "SELECT msg.id,file.box,file.sub,file.name FROM msg JOIN"
+                              " file ON file.msg=msg.id WHERE msg.rcpt='' AND msg.id IN"
+                              " (SELECT msg FROM tag WHERE name='sent') GROUP BY msg.id");
+    set = prepare_statement(d, "UPDATE msg SET rcpt=? WHERE id=?");
     while (sqlite3_step(st) == SQLITE_ROW) {
-        if (!filepath((const char *)sqlite3_column_text(st, 1), (const char *)sqlite3_column_text(st, 2), (const char *)sqlite3_column_text(st, 3), path,
-                      sizeof path) ||
-            readfile(path, &buf, &len) < 0)
+        if (!file_path((const char *)sqlite3_column_text(st, 1), (const char *)sqlite3_column_text(st, 2), (const char *)sqlite3_column_text(st, 3), path,
+                       sizeof path) ||
+            read_file(path, &buf, &len) < 0)
             continue;
-        mailparse(buf, len, &m);
-        bindtext(set, 1, m.to);
+        mail_parse(buf, len, &m);
+        bind_text(set, 1, m.to);
         sqlite3_bind_int64(set, 2, sqlite3_column_int64(st, 0));
-        step1(d, set);
-        mailfree(&m);
+        step_integer(d, set);
+        mail_free(&m);
         free(buf);
         n++;
     }
     sqlite3_finalize(st);
     sqlite3_finalize(set);
-    metaset(d, "rcptfill", 1);
+    meta_set(d, "rcptfill", 1);
     if (n)
         fprintf(stderr, "hml new: recipients backfilled for %ld sent\n", n);
 }
 
 /* apply whatever the log holds beyond what this index has seen; only
  * complete lines count, a writer may be mid-line */
-static void taglogreplay(Db *d) {
+static void tag_log_replay(Db *d) {
     char path[4096], *buf, *line, *nl, *tab;
-    long off = metaint(d, "taglog"), size, done;
+    long off = meta_get(d, "taglog"), size, done;
     FILE *f;
     size_t n;
     Op *ops;
 
-    taglogpath(path, sizeof path);
+    tag_log_path(path, sizeof path);
     if (!(f = fopen(path, "rb")))
         return;
     fseek(f, 0, SEEK_END);
@@ -782,16 +782,16 @@ static void taglogreplay(Db *d) {
             continue;
         *tab = '\0';
         ops = NULL;
-        if (parseops(tab + 1, &ops) == 0)
-            applyops(d, line, ops);
-        freeops(ops);
+        if (parse_tag_ops(tab + 1, &ops) == 0)
+            apply_tag_ops(d, line, ops);
+        free_tag_ops(ops);
     }
     free(buf);
-    metaset(d, "taglog", done);
+    meta_set(d, "taglog", done);
 }
 
 /* config.h rules against the messages this run indexed */
-static void applyrules(Db *d) {
+static void apply_tag_rules(Db *d) {
     Query q;
     sqlite3_stmt *st;
     char *err = NULL;
@@ -800,30 +800,30 @@ static void applyrules(Db *d) {
 
     for (i = 0; i < ntagrules; i++) {
         ops = NULL;
-        if (parseops(tagrules[i].tags, &ops) < 0 || querycompile(tagrules[i].query, &q, &err) < 0) {
+        if (parse_tag_ops(tagrules[i].tags, &ops) < 0 || query_compile(tagrules[i].query, &q, &err) < 0) {
             fprintf(stderr, "hml new: tag rule %d: %s\n", i, err ? err : "bad tag list");
             free(err);
             err = NULL;
-            freeops(ops);
+            free_tag_ops(ops);
             continue;
         }
-        st = queryprep(d->db,
-                       "SELECT mid FROM msg WHERE id IN (SELECT id FROM "
-                       "newmsg) AND (%s)",
-                       &q, "", &err);
+        st = query_prepare(d->db,
+                           "SELECT mid FROM msg WHERE id IN (SELECT id FROM "
+                           "newmsg) AND (%s)",
+                           &q, "", &err);
         if (!st) {
             fprintf(stderr, "hml new: tag rule %d: %s\n", i, err);
             free(err);
             err = NULL;
         } else {
             while ((rc = sqlite3_step(st)) == SQLITE_ROW)
-                applyops(d, (const char *)sqlite3_column_text(st, 0), ops);
+                apply_tag_ops(d, (const char *)sqlite3_column_text(st, 0), ops);
             if (rc != SQLITE_DONE)
                 die(d, "rule");
             sqlite3_finalize(st);
         }
-        queryfree(&q);
-        freeops(ops);
+        query_free(&q);
+        free_tag_ops(ops);
     }
 }
 
@@ -832,7 +832,7 @@ static void applyrules(Db *d) {
 /* the thread a new message joins: that of any message it references, or
  * any message referencing it or sharing a reference (JWZ connectivity);
  * several such threads are merged into the lowest. 0 = starts its own */
-static sqlite3_int64 threadfor(Db *d, const Mail *m) {
+static sqlite3_int64 thread_for(Db *d, const Mail *m) {
     char *sql = NULL;
     sqlite3_stmt *st;
     sqlite3_int64 first = 0, t;
@@ -840,24 +840,24 @@ static sqlite3_int64 threadfor(Db *d, const Mail *m) {
     int k = 1, rc;
 
     if (n) {
-        sadd(&sql, "SELECT thread FROM msg WHERE mid IN (");
+        append_string(&sql, "SELECT thread FROM msg WHERE mid IN (");
         for (i = 0; i < n; i++)
-            sadd(&sql, i ? ",?" : "?");
-        sadd(&sql, ") UNION ");
+            append_string(&sql, i ? ",?" : "?");
+        append_string(&sql, ") UNION ");
     }
-    sadd(&sql, "SELECT msg.thread FROM ref JOIN msg ON msg.id=ref.msg"
-               " WHERE ref.mid IN (");
+    append_string(&sql, "SELECT msg.thread FROM ref JOIN msg ON msg.id=ref.msg"
+                        " WHERE ref.mid IN (");
     for (i = 0; i <= n; i++)
-        sadd(&sql, i ? ",?" : "?");
-    sadd(&sql, ") ORDER BY 1");
+        append_string(&sql, i ? ",?" : "?");
+    append_string(&sql, ") ORDER BY 1");
     arrput(sql, '\0');
-    st = prep(d, sql);
+    st = prepare_statement(d, sql);
     arrfree(sql);
     for (i = 0; i < n; i++)
-        bindtext(st, k++, m->refs[i]);
+        bind_text(st, k++, m->refs[i]);
     for (i = 0; i < n; i++)
-        bindtext(st, k++, m->refs[i]);
-    bindtext(st, k++, m->mid);
+        bind_text(st, k++, m->refs[i]);
+    bind_text(st, k++, m->mid);
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         t = sqlite3_column_int64(st, 0);
         if (!first)
@@ -865,11 +865,11 @@ static sqlite3_int64 threadfor(Db *d, const Mail *m) {
         else if (t != first) {
             sqlite3_bind_int64(d->merge, 1, first);
             sqlite3_bind_int64(d->merge, 2, t);
-            step1(d, d->merge);
+            step_integer(d, d->merge);
         }
     }
     if (rc != SQLITE_DONE)
-        die(d, "threadfor");
+        die(d, "thread_for");
     sqlite3_finalize(st);
     return first;
 }
@@ -883,88 +883,88 @@ typedef struct {
     char *name;         /* maildir file name */
 } Job;
 
-static size_t baselen(const char *name) {
+static size_t base_length(const char *name) {
     const char *c = strstr(name, ":2,");
 
     return c ? (size_t)(c - name) : strlen(name);
 }
 
-static const char *flagsof(const char *name) {
+static const char *filename_flags(const char *name) {
     const char *c = strstr(name, ":2,");
 
     return c ? c + 3 : "";
 }
 
-static void addfile(Db *d, const Job *j, const Mail *m) {
+static void add_file(Db *d, const Job *j, const Mail *m) {
     sqlite3_int64 id, thread;
     char base[512];
     ptrdiff_t i;
 
-    bindtext(d->msgbymid, 1, m->mid);
-    id = step1(d, d->msgbymid);
+    bind_text(d->msgbymid, 1, m->mid);
+    id = step_integer(d, d->msgbymid);
     if (id < 0) {
-        thread = threadfor(d, m);
-        bindtext(d->insmsg, 1, m->mid);
+        thread = thread_for(d, m);
+        bind_text(d->insmsg, 1, m->mid);
         sqlite3_bind_int64(d->insmsg, 2, thread);
         sqlite3_bind_int64(d->insmsg, 3, m->date);
-        bindtext(d->insmsg, 4, m->subject);
-        bindtext(d->insmsg, 5, m->from);
+        bind_text(d->insmsg, 4, m->subject);
+        bind_text(d->insmsg, 5, m->from);
         sqlite3_bind_int(d->insmsg, 6, m->hasatt);
-        bindtext(d->insmsg, 7, m->intent ? m->intent : "");
-        bindtext(d->insmsg, 8, m->to);
-        step1(d, d->insmsg);
+        bind_text(d->insmsg, 7, m->intent ? m->intent : "");
+        bind_text(d->insmsg, 8, m->to);
+        step_integer(d, d->insmsg);
         id = sqlite3_last_insert_rowid(d->db);
         if (!thread) {
             sqlite3_bind_int64(d->setthread, 1, id);
             sqlite3_bind_int64(d->setthread, 2, id);
-            step1(d, d->setthread);
+            step_integer(d, d->setthread);
         }
         sqlite3_bind_int64(d->insfts, 1, id);
-        bindtext(d->insfts, 2, m->subject);
-        bindtext(d->insfts, 3, m->from);
-        bindtext(d->insfts, 4, m->to);
-        bindtext(d->insfts, 5, m->attach);
-        bindtext(d->insfts, 6, m->body);
-        step1(d, d->insfts);
+        bind_text(d->insfts, 2, m->subject);
+        bind_text(d->insfts, 3, m->from);
+        bind_text(d->insfts, 4, m->to);
+        bind_text(d->insfts, 5, m->attach);
+        bind_text(d->insfts, 6, m->body);
+        step_integer(d, d->insfts);
         for (i = 0; i < arrlen(m->refs); i++) {
             sqlite3_bind_int64(d->insref, 1, id);
-            bindtext(d->insref, 2, m->refs[i]);
-            step1(d, d->insref);
+            bind_text(d->insref, 2, m->refs[i]);
+            step_integer(d, d->insref);
         }
         sqlite3_bind_int64(d->insnew, 1, id);
-        step1(d, d->insnew);
+        step_integer(d, d->insnew);
         d->newmsgs++;
     } else if (m->hasatt) {
         /* another file of a known message: it may carry the attachment
          * the first delivery lacked (duplicate list deliveries do) */
         sqlite3_bind_int64(d->setattach, 1, id);
-        step1(d, d->setattach);
+        step_integer(d, d->setattach);
     }
-    snprintf(base, sizeof base, "%.*s", (int)baselen(j->name), j->name);
-    bindtext(d->insfile, 1, j->box);
-    bindtext(d->insfile, 2, base);
-    bindtext(d->insfile, 3, j->sub);
-    bindtext(d->insfile, 4, j->name);
-    bindtext(d->insfile, 5, flagsof(j->name));
+    snprintf(base, sizeof base, "%.*s", (int)base_length(j->name), j->name);
+    bind_text(d->insfile, 1, j->box);
+    bind_text(d->insfile, 2, base);
+    bind_text(d->insfile, 3, j->sub);
+    bind_text(d->insfile, 4, j->name);
+    bind_text(d->insfile, 5, filename_flags(j->name));
     sqlite3_bind_int64(d->insfile, 6, id);
-    step1(d, d->insfile);
+    step_integer(d, d->insfile);
     retag(d, id);
     d->added++;
 }
 
-static void dropfile(Db *d, const char *box, const char *base, sqlite3_int64 id) {
-    bindtext(d->delfile, 1, box);
-    bindtext(d->delfile, 2, base);
-    step1(d, d->delfile);
+static void drop_file(Db *d, const char *box, const char *base, sqlite3_int64 id) {
+    bind_text(d->delfile, 1, box);
+    bind_text(d->delfile, 2, base);
+    step_integer(d, d->delfile);
     sqlite3_bind_int64(d->nfiles, 1, id);
-    if (step1(d, d->nfiles) > 0) {
+    if (step_integer(d, d->nfiles) > 0) {
         retag(d, id);
     } else {
         sqlite3_stmt *by[] = {d->delmsg, d->delfts, d->delref, d->deltag};
         size_t i;
         for (i = 0; i < sizeof by / sizeof *by; i++) {
             sqlite3_bind_int64(by[i], 1, id);
-            step1(d, by[i]);
+            step_integer(d, by[i]);
         }
     }
     d->removed++;
@@ -987,11 +987,11 @@ typedef struct {
 typedef struct {
     Job *jobs;
     Dir *dirs;    /* mtimes to record once every job is in */
-    char **boxes; /* every box the scan visited, for prunegone */
+    char **boxes; /* every box the scan visited, for prune_gone_boxes */
     long now;
 } Scan;
 
-static int listdir(const char *path, char ***names) {
+static int list_directory(const char *path, char ***names) {
     DIR *dp;
     struct dirent *e;
 
@@ -1006,7 +1006,7 @@ static int listdir(const char *path, char ***names) {
 
 /* diff one maildir against the index: moves and removals are applied on
  * the spot, new files become jobs for the parsers */
-static void scanbox(Db *d, Scan *sc, const char *box, const char *boxdir, int force) {
+static void scan_box(Db *d, Scan *sc, const char *box, const char *boxdir, int force) {
     static const char *subs[] = {"cur", "new"};
     char path[4160], dirkey[256];
     struct stat st;
@@ -1022,15 +1022,15 @@ static void scanbox(Db *d, Scan *sc, const char *box, const char *boxdir, int fo
         snprintf(path, sizeof path, "%s/%s", boxdir, subs[k]);
         snprintf(dirkey, sizeof dirkey, "%s/%s", box, subs[k]);
         mtime[k] = stat(path, &st) < 0 ? -1 : (long)st.st_mtime;
-        bindtext(d->dirget, 1, dirkey);
-        if (mtime[k] < 0 || step1(d, d->dirget) != mtime[k])
+        bind_text(d->dirget, 1, dirkey);
+        if (mtime[k] < 0 || step_integer(d, d->dirget) != mtime[k])
             changed = 1;
     }
     if (!changed)
         return;
     for (k = 0; k < 2; k++) {
         snprintf(path, sizeof path, "%s/%s", boxdir, subs[k]);
-        if (listdir(path, &names[k]) < 0) {
+        if (list_directory(path, &names[k]) < 0) {
             if (errno != ENOENT)
                 fprintf(stderr, "hml new: %s: %s\n", path, strerror(errno));
             continue;
@@ -1044,7 +1044,7 @@ static void scanbox(Db *d, Scan *sc, const char *box, const char *boxdir, int fo
         }
     }
     sh_new_strdup(known);
-    bindtext(d->boxfiles, 1, box);
+    bind_text(d->boxfiles, 1, box);
     while ((rc = sqlite3_step(d->boxfiles)) == SQLITE_ROW) {
         Known e = {NULL, NULL, NULL, NULL, 0, 0};
         e.key = (char *)sqlite3_column_text(d->boxfiles, 0);
@@ -1060,16 +1060,16 @@ static void scanbox(Db *d, Scan *sc, const char *box, const char *boxdir, int fo
     for (k = 0; k < 2; k++) {
         for (i = 0; i < arrlen(names[k]); i++) {
             char *name = names[k][i], base[512];
-            snprintf(base, sizeof base, "%.*s", (int)baselen(name), name);
+            snprintf(base, sizeof base, "%.*s", (int)base_length(name), name);
             if ((kn = shgetp_null(known, base))) {
                 kn->seen = 1;
                 if (strcmp(kn->name, name) || strcmp(kn->sub, subs[k])) {
-                    bindtext(d->mvfile, 1, subs[k]);
-                    bindtext(d->mvfile, 2, name);
-                    bindtext(d->mvfile, 3, flagsof(name));
-                    bindtext(d->mvfile, 4, box);
-                    bindtext(d->mvfile, 5, base);
-                    step1(d, d->mvfile);
+                    bind_text(d->mvfile, 1, subs[k]);
+                    bind_text(d->mvfile, 2, name);
+                    bind_text(d->mvfile, 3, filename_flags(name));
+                    bind_text(d->mvfile, 4, box);
+                    bind_text(d->mvfile, 5, base);
+                    step_integer(d, d->mvfile);
                     retag(d, kn->msg);
                     d->moved++;
                 }
@@ -1083,7 +1083,7 @@ static void scanbox(Db *d, Scan *sc, const char *box, const char *boxdir, int fo
     }
     for (i = 0; i < shlen(known); i++) {
         if (!known[i].seen)
-            dropfile(d, box, known[i].key, known[i].msg);
+            drop_file(d, box, known[i].key, known[i].msg);
         free(known[i].sub);
         free(known[i].name);
         free(known[i].flags);
@@ -1108,7 +1108,7 @@ typedef struct {
     pthread_cond_t notfull, notempty;
 } Pool;
 
-static int readfile(const char *path, char **buf, size_t *len) {
+static int read_file(const char *path, char **buf, size_t *len) {
     FILE *f = fopen(path, "rb");
     struct stat st;
     size_t n;
@@ -1126,7 +1126,7 @@ static int readfile(const char *path, char **buf, size_t *len) {
     return 0;
 }
 
-static void *worker(void *arg) {
+static void *parse_worker(void *arg) {
     Pool *p = arg;
     char path[4160], *buf;
     size_t len;
@@ -1142,8 +1142,8 @@ static void *worker(void *arg) {
         snprintf(path, sizeof path, "%s/%s/%s", j->boxdir, j->sub, j->name);
         r.ok = 0;
         memset(&r.m, 0, sizeof r.m);
-        if (readfile(path, &buf, &len) == 0) {
-            mailparse(buf, len, &r.m);
+        if (read_file(path, &buf, &len) == 0) {
+            mail_parse(buf, len, &r.m);
             free(buf);
             r.ok = 1;
         }
@@ -1158,7 +1158,7 @@ static void *worker(void *arg) {
     }
 }
 
-static void index_(Db *d, Scan *sc) {
+static void run_index_jobs(Db *d, Scan *sc) {
     Pool p;
     pthread_t tid[32];
     long n = arrlen(sc->jobs), done = 0, nthreads, i;
@@ -1177,7 +1177,7 @@ static void index_(Db *d, Scan *sc) {
     if (nthreads > n)
         nthreads = n;
     for (i = 0; i < nthreads; i++)
-        pthread_create(&tid[i], NULL, worker, &p);
+        pthread_create(&tid[i], NULL, parse_worker, &p);
     while (done < n) {
         Res r;
         pthread_mutex_lock(&p.mtx);
@@ -1189,14 +1189,14 @@ static void index_(Db *d, Scan *sc) {
         pthread_cond_signal(&p.notfull);
         pthread_mutex_unlock(&p.mtx);
         if (r.ok) {
-            addfile(d, &sc->jobs[r.job], &r.m);
-            mailfree(&r.m);
+            add_file(d, &sc->jobs[r.job], &r.m);
+            mail_free(&r.m);
         } else
             fprintf(stderr, "hml new: cannot read %s/%s/%s\n", sc->jobs[r.job].box, sc->jobs[r.job].sub, sc->jobs[r.job].name);
         done++;
         if (done % 2000 == 0) {
-            exec(d, "COMMIT");
-            exec(d, "BEGIN IMMEDIATE");
+            execute_sql(d, "COMMIT");
+            execute_sql(d, "BEGIN IMMEDIATE");
         }
         if (tty && done % 500 == 0)
             fprintf(stderr, "\r%ld/%ld", done, n);
@@ -1207,13 +1207,13 @@ static void index_(Db *d, Scan *sc) {
         pthread_join(tid[i], NULL);
 }
 
-static void scanlocal(Db *d, Scan *sc, const char *root, const char *rel, int depth, int force) {
+static void scan_local_boxes(Db *d, Scan *sc, const char *root, const char *rel, int depth, int force) {
     char dir[4200], sub[4200], cur[4300], box[512], **names = NULL;
     struct stat st;
     ptrdiff_t i;
 
     snprintf(dir, sizeof dir, "%s%s%s", root, *rel ? "/" : "", rel);
-    if (listdir(dir, &names) < 0) {
+    if (list_directory(dir, &names) < 0) {
         if (errno != ENOENT)
             fprintf(stderr, "hml new: %s: %s\n", dir, strerror(errno));
         return;
@@ -1225,10 +1225,10 @@ static void scanlocal(Db *d, Scan *sc, const char *root, const char *rel, int de
             if (stat(cur, &st) == 0 && S_ISDIR(st.st_mode)) {
                 snprintf(box, sizeof box, "%s/%.400s", localdomain, sub);
                 snprintf(cur, sizeof cur, "%s/%s", root, sub);
-                scanbox(d, sc, strdup(box), strdup(cur), force);
+                scan_box(d, sc, strdup(box), strdup(cur), force);
             }
             if (depth < 2)
-                scanlocal(d, sc, root, sub, depth + 1, force);
+                scan_local_boxes(d, sc, root, sub, depth + 1, force);
         }
         free(names[i]);
     }
@@ -1236,11 +1236,11 @@ static void scanlocal(Db *d, Scan *sc, const char *root, const char *rel, int de
 }
 
 /* a box whose maildir is gone (renamed, deleted) is never visited by
- * scanbox, so its rows would outlive it: drop every file of every box the
+ * scan_box, so its rows would outlive it: drop every file of every box the
  * scan did not see, and the dir mtimes that would hide it on a rebuild */
-static void prunegone(Db *d, Scan *sc) {
-    sqlite3_stmt *boxes = prep(d, "SELECT DISTINCT box FROM file");
-    sqlite3_stmt *dirdel = prep(d, "DELETE FROM dir WHERE path=? OR path=?");
+static void prune_gone_boxes(Db *d, Scan *sc) {
+    sqlite3_stmt *boxes = prepare_statement(d, "SELECT DISTINCT box FROM file");
+    sqlite3_stmt *dirdel = prepare_statement(d, "DELETE FROM dir WHERE path=? OR path=?");
     char **gone = NULL, key[2][256];
     ptrdiff_t i, j;
     int rc;
@@ -1257,7 +1257,7 @@ static void prunegone(Db *d, Scan *sc) {
     sqlite3_finalize(boxes);
     for (j = 0; j < arrlen(gone); j++) {
         Known *known = NULL;
-        bindtext(d->boxfiles, 1, gone[j]);
+        bind_text(d->boxfiles, 1, gone[j]);
         while ((rc = sqlite3_step(d->boxfiles)) == SQLITE_ROW) {
             Known e = {NULL, NULL, NULL, NULL, 0, 0};
             e.key = strdup((const char *)sqlite3_column_text(d->boxfiles, 0));
@@ -1268,22 +1268,22 @@ static void prunegone(Db *d, Scan *sc) {
             die(d, "boxfiles");
         sqlite3_reset(d->boxfiles);
         for (i = 0; i < arrlen(known); i++) {
-            dropfile(d, gone[j], known[i].key, known[i].msg);
+            drop_file(d, gone[j], known[i].key, known[i].msg);
             free(known[i].key);
         }
         arrfree(known);
         snprintf(key[0], sizeof key[0], "%s/cur", gone[j]);
         snprintf(key[1], sizeof key[1], "%s/new", gone[j]);
-        bindtext(dirdel, 1, key[0]);
-        bindtext(dirdel, 2, key[1]);
-        step1(d, dirdel);
+        bind_text(dirdel, 1, key[0]);
+        bind_text(dirdel, 2, key[1]);
+        step_integer(d, dirdel);
         free(gone[j]);
     }
     arrfree(gone);
     sqlite3_finalize(dirdel);
 }
 
-int newmain(int argc, char **argv) {
+int new_main(int argc, char **argv) {
     Db d;
     Scan sc = {NULL, NULL, NULL, 0};
     char err[256], root[4096], boxdir[4160], box[256];
@@ -1300,46 +1300,46 @@ int newmain(int argc, char **argv) {
         }
     }
     memset(&d, 0, sizeof d);
-    if (!(d.db = dbopen(err, sizeof err))) {
+    if (!(d.db = db_open(err, sizeof err))) {
         fprintf(stderr, "hml new: %s\n", err);
         return 2;
     }
-    prepall(&d);
+    prepare_statements(&d);
     clock_gettime(CLOCK_MONOTONIC, &t0);
     sc.now = (long)time(NULL);
-    exec(&d, "BEGIN IMMEDIATE");
+    execute_sql(&d, "BEGIN IMMEDIATE");
     for (i = 0; i < naccounts; i++) {
-        expand(accounts[i].maildir, root, sizeof root);
+        expand_home(accounts[i].maildir, root, sizeof root);
         for (k = 0; k < accounts[i].nchannels; k++) {
             snprintf(box, sizeof box, "%s/%s", accounts[i].name, accounts[i].channels[k].near);
             snprintf(boxdir, sizeof boxdir, "%s/%s", root, accounts[i].channels[k].near);
-            scanbox(&d, &sc, strdup(box), strdup(boxdir), force);
+            scan_box(&d, &sc, strdup(box), strdup(boxdir), force);
         }
     }
     /* the local boxes: every maildir under localbox, up to three deep
      * (hai/main, hai/<agent>, hai/user), named by their relative path */
-    expand(localbox, root, sizeof root);
-    scanlocal(&d, &sc, root, "", 0, force);
-    prunegone(&d, &sc);
-    exec(&d, "COMMIT");
+    expand_home(localbox, root, sizeof root);
+    scan_local_boxes(&d, &sc, root, "", 0, force);
+    prune_gone_boxes(&d, &sc);
+    execute_sql(&d, "COMMIT");
     if (arrlen(sc.jobs)) {
-        exec(&d, "BEGIN IMMEDIATE");
-        index_(&d, &sc);
-        exec(&d, "COMMIT");
+        execute_sql(&d, "BEGIN IMMEDIATE");
+        run_index_jobs(&d, &sc);
+        execute_sql(&d, "COMMIT");
     }
-    exec(&d, "BEGIN IMMEDIATE");
+    execute_sql(&d, "BEGIN IMMEDIATE");
     if (d.newmsgs) {
-        applyrules(&d);
-        gwinbound(d.db); /* mail from outside, onto the bus */
+        apply_tag_rules(&d);
+        gateway_inbound(d.db); /* mail from outside, onto the bus */
     }
-    taglogreplay(&d); /* after the rules: manual edits win on a rebuild */
-    fillrcpt(&d);
+    tag_log_replay(&d); /* after the rules: manual edits win on a rebuild */
+    backfill_recipients(&d);
     for (j = 0; j < arrlen(sc.dirs); j++) {
-        bindtext(d.dirset, 1, sc.dirs[j].path);
+        bind_text(d.dirset, 1, sc.dirs[j].path);
         sqlite3_bind_int64(d.dirset, 2, sc.dirs[j].mtime);
-        step1(&d, d.dirset);
+        step_integer(&d, d.dirset);
     }
-    exec(&d, "COMMIT");
+    execute_sql(&d, "COMMIT");
     clock_gettime(CLOCK_MONOTONIC, &t1);
     if (d.added || d.moved || d.removed)
         printf("hml new: %ld files added (%ld new messages), %ld moved, "
@@ -1349,7 +1349,7 @@ int newmain(int argc, char **argv) {
     return 0;
 }
 
-int tagmain(int argc, char **argv) {
+int tag_main(int argc, char **argv) {
     Db d;
     Query q;
     sqlite3_stmt *st;
@@ -1364,39 +1364,39 @@ int tagmain(int argc, char **argv) {
             i++;
             break;
         }
-        sadd(&spec, argv[i]);
-        sadd(&spec, " ");
+        append_string(&spec, argv[i]);
+        append_string(&spec, " ");
     }
     for (; i < argc; i++) {
         if (query)
-            sadd(&query, " ");
-        sadd(&query, argv[i]);
+            append_string(&query, " ");
+        append_string(&query, argv[i]);
     }
     if (spec)
         arrput(spec, '\0');
     if (query)
         arrput(query, '\0');
-    if (!spec || !query || parseops(spec, &ops) < 0 || !arrlen(ops)) {
+    if (!spec || !query || parse_tag_ops(spec, &ops) < 0 || !arrlen(ops)) {
         fputs("usage: hml tag +tag|-tag ... [--] <query>\n", stderr);
         arrfree(spec);
         arrfree(query);
-        freeops(ops);
+        free_tag_ops(ops);
         return 2;
     }
     for (i = 0; i < arrlen(ops); i++)
         if (strpbrk(ops[i].name, " \t\n")) {
             fprintf(stderr, "hml tag: bad tag '%s'\n", ops[i].name);
-            freeops(ops);
+            free_tag_ops(ops);
             return 2;
         }
-    if (querycompile(query, &q, &err) < 0) {
+    if (query_compile(query, &q, &err) < 0) {
         fprintf(stderr, "hml tag: %s\n", err);
         free(err);
-        freeops(ops);
+        free_tag_ops(ops);
         return 2;
     }
     memset(&d, 0, sizeof d);
-    if (!(d.db = dbopen(dberr, sizeof dberr))) {
+    if (!(d.db = db_open(dberr, sizeof dberr))) {
         fprintf(stderr, "hml tag: %s\n", dberr);
         return 2;
     }
@@ -1404,20 +1404,20 @@ int tagmain(int argc, char **argv) {
      * deleted is both (the files only in the local boxes) */
     for (i = 0; i < arrlen(ops); i++) {
         int inv;
-        if (flagof(ops[i].name, &inv))
+        if (flag_of_tag(ops[i].name, &inv))
             arrput(flagops, ops[i]);
         else
             arrput(tagops, ops[i]);
         if (!strcmp(ops[i].name, "deleted"))
             arrput(flagops, ops[i]);
     }
-    prepall(&d);
-    exec(&d, "BEGIN IMMEDIATE");
+    prepare_statements(&d);
+    execute_sql(&d, "BEGIN IMMEDIATE");
     /* overrides of flag names from before flags were mirrored are inert
      * now; drop them so they can never shadow the real maildir state */
-    exec(&d, "DELETE FROM utag WHERE name IN "
-             "('unread','flagged','replied','passed')");
-    if (!(st = queryprep(d.db, "SELECT id,mid FROM msg WHERE %s", &q, "", &err))) {
+    execute_sql(&d, "DELETE FROM utag WHERE name IN "
+                    "('unread','flagged','replied','passed')");
+    if (!(st = query_prepare(d.db, "SELECT id,mid FROM msg WHERE %s", &q, "", &err))) {
         fprintf(stderr, "hml tag: %s\n", err);
         return 2;
     }
@@ -1427,30 +1427,30 @@ int tagmain(int argc, char **argv) {
         if (strpbrk(mid, "\t\n"))
             continue; /* cannot be logged faithfully; never seen */
         if (arrlen(flagops))
-            mirrorflags(&d, id, mid, flagops);
+            mirror_flags(&d, id, mid, flagops);
         if (arrlen(tagops)) {
-            logline(&log, mid, tagops);
-            applyops(&d, mid, tagops);
+            tag_log_line(&log, mid, tagops);
+            apply_tag_ops(&d, mid, tagops);
         }
     }
     if (rc != SQLITE_DONE)
         die(&d, "tag");
     sqlite3_finalize(st);
     if (arrlen(log)) {
-        if ((size = taglogappend(log, arrlenu(log))) < 0) {
+        if ((size = tag_log_append(log, arrlenu(log))) < 0) {
             fprintf(stderr, "hml tag: cannot write tag log: %s\n", strerror(errno));
-            exec(&d, "ROLLBACK");
+            execute_sql(&d, "ROLLBACK");
             return 2;
         }
-        metaset(&d, "taglog", size);
+        meta_set(&d, "taglog", size);
     }
-    exec(&d, "COMMIT");
+    execute_sql(&d, "COMMIT");
     sqlite3_close_v2(d.db);
     arrfree(log);
-    queryfree(&q);
+    query_free(&q);
     arrfree(flagops); /* the names belong to ops */
     arrfree(tagops);
-    freeops(ops);
+    free_tag_ops(ops);
     arrfree(spec);
     arrfree(query);
     return 0;

@@ -8,7 +8,7 @@
 
 #include "hml.h"
 
-unsigned letterflags(const char *s) {
+unsigned flags_from_letters(const char *s) {
     unsigned f = 0;
 
     for (; *s; s++) {
@@ -37,7 +37,7 @@ unsigned letterflags(const char *s) {
 }
 
 /* mbsync writes flag letters in alphabetical order */
-void flagletters(unsigned f, char *out) {
+void flags_to_letters(unsigned f, char *out) {
     int i = 0;
 
     if (f & FDraft)
@@ -57,7 +57,7 @@ void flagletters(unsigned f, char *out) {
 
 /* .mbsyncstate: "Key Value" header lines, blank line, then one
  * "faruid nearuid flags" entry per paired message */
-int stateload(const char *boxdir, State *st, char *err, size_t errlen) {
+int sync_state_load(const char *boxdir, State *st, char *err, size_t errlen) {
     char path[4160], line[256], flags[64];
     FILE *fp;
     int inheader = 1;
@@ -89,7 +89,7 @@ int stateload(const char *boxdir, State *st, char *err, size_t errlen) {
         if (n < 2)
             continue;
         if (n == 3)
-            p.flags = letterflags(flags);
+            p.flags = flags_from_letters(flags);
         arrput(st->pairs, p);
     }
     if (ferror(fp)) {
@@ -103,7 +103,7 @@ int stateload(const char *boxdir, State *st, char *err, size_t errlen) {
 
 /* atomic replace: write a temp file, fsync, rename over the original, so a
  * crash can never leave a truncated state for mbsync or hml to trip on */
-static int replacefile(const char *tmp, const char *path, FILE *f, char *err, size_t errlen) {
+static int replace_file(const char *tmp, const char *path, FILE *f, char *err, size_t errlen) {
     if (fflush(f) || fsync(fileno(f)) < 0 || ferror(f)) {
         snprintf(err, errlen, "write error on %s: %s", tmp, strerror(errno));
         fclose(f);
@@ -119,7 +119,7 @@ static int replacefile(const char *tmp, const char *path, FILE *f, char *err, si
     return 0;
 }
 
-int statewrite(const char *boxdir, const State *st, char *err, size_t errlen) {
+int sync_state_write(const char *boxdir, const State *st, char *err, size_t errlen) {
     char tmp[4160], path[4160], fl[8];
     FILE *f;
     ptrdiff_t i;
@@ -138,13 +138,13 @@ int statewrite(const char *boxdir, const State *st, char *err, size_t errlen) {
         const Pair *p = &st->pairs[i];
         if (p->dead)
             continue;
-        flagletters(p->flags, fl);
+        flags_to_letters(p->flags, fl);
         fprintf(f, "%u %u %s\n", p->fuid, p->nuid, fl);
     }
-    return replacefile(tmp, path, f, err, errlen);
+    return replace_file(tmp, path, f, err, errlen);
 }
 
-int uvload(const char *boxdir, uint32_t *uidval, uint32_t *lastuid, char *err, size_t errlen) {
+int uidvalidity_load(const char *boxdir, uint32_t *uidval, uint32_t *lastuid, char *err, size_t errlen) {
     char path[4160];
     FILE *f;
 
@@ -161,7 +161,7 @@ int uvload(const char *boxdir, uint32_t *uidval, uint32_t *lastuid, char *err, s
     return 1;
 }
 
-int uvwrite(const char *boxdir, uint32_t uidval, uint32_t lastuid, char *err, size_t errlen) {
+int uidvalidity_write(const char *boxdir, uint32_t uidval, uint32_t lastuid, char *err, size_t errlen) {
     char tmp[4160], path[4160];
     FILE *f;
 
@@ -172,7 +172,7 @@ int uvwrite(const char *boxdir, uint32_t uidval, uint32_t lastuid, char *err, si
         return -1;
     }
     fprintf(f, "%u\n%u\n", uidval, lastuid);
-    return replacefile(tmp, path, f, err, errlen);
+    return replace_file(tmp, path, f, err, errlen);
 }
 
-void statefree(State *st) { arrfree(st->pairs); }
+void sync_state_free(State *st) { arrfree(st->pairs); }

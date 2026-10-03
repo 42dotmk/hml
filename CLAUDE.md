@@ -88,7 +88,7 @@ How the index works (index.c, mime.c, query.c):
   is diffed only when `cur/` or `new/` mtime moved (a dir touched in the
   current second is left unrecorded so it is looked at again). A box
   the scan never reaches (its maildir renamed or deleted) is pruned
-  afterwards (`prunegone`), files, messages and mtimes alike. Parsing
+  afterwards (`prune_gone_boxes`), files, messages and mtimes alike. Parsing
   runs on all cores, one writer thread does the SQLite inserts.
 - The FTS5 table is contentless (`contentless_delete=1`) with columns
   subject/sender/rcpt/attach/body; `from:x` compiles to
@@ -143,20 +143,20 @@ other recipients in Cc minus our own addresses, no header folding (hed
 reads the template line by line). `count --batch` and a `--` option
 terminator complete the notmuch CLI surface hed's mail plugin uses; the
 plugin now runs on hml alone (mail_git_patch too, via `--format=mbox`).
-mime.c exports its header/MIME primitives (`mime*` in hml.h) for
+mime.c exports its header/MIME primitives (`mime_*` in hml.h) for
 show.c; the index is untouched.
 
-Flag mirroring (index.c `mirrorflags`): the four tags that are maildir
+Flag mirroring (index.c `mirror_flags`): the four tags that are maildir
 flags — `unread` (Seen, inverted), `flagged`, `replied`, `passed` — are
-handled by `hml tag` as file renames via `mdsetflags` (seen mail moves
+handled by `hml tag` as file renames via `maildir_set_flags` (seen mail moves
 new/ → cur/), the `file` row updated to match, then `retag`. They are
-never written to `utag` nor to `.htags`; `applyops` skips them, which
+never written to `utag` nor to `.htags`; `apply_tag_ops` skips them, which
 also makes historical log lines naming them inert on replay, and
 `hml tag` drops any pre-existing overrides of those names so they can't
 shadow the files. `hml recv` then pushes the flag change like any local
 one (notmuch's `maildir.synchronize_flags`, without the option).
 
-Local delivery (send.c `deliverlocal`, maildir.c `mddeliver`): a
+Local delivery (send.c `deliver_local`, maildir.c `maildir_deliver`): a
 recipient whose domain is `localdomain` (config.h, "hai") or
 `localhost` is written into the Maildir `<localbox>/<localpart>/`
 instead of going to SMTP — tmp/ then rename into new/, Bcc blocks
@@ -164,25 +164,25 @@ skipped, CR stripped, `Date:`/`Message-ID:` synthesized when absent
 (one id shared by all local copies), a headerless body gets `To:` and
 the blank line. Mixed recipient lists deliver locally first, then
 submit the rest; an all-local list needs no account at all. `hml new`
-walks `<localbox>` recursively, up to three deep (`scanlocal`), every
+walks `<localbox>` recursively, up to three deep (`scan_local_boxes`), every
 directory with a `cur/` being a box named by its relative path
-(`hai/main`, `hai/<agent>`); `hml.c boxroot` resolves both account
-boxes and local ones (`filepath` and `mirrorflags` use it). This is
+(`hai/main`, `hai/<agent>`); `hml.c box_directory` resolves both account
+boxes and local ones (`file_path` and `mirror_flags` use it). This is
 hai's message bus and conversation store (`main@hai` is the agent,
 `user@hai` the person, `hai/<agent>` one agent's Maildir with every
 conversation a thread in its `cur/`; the format is hai's `MAIL.md`).
-`deleted` on a local message (`localrow`) is both an override and the
-T flag: `hml tag` puts it in both lists and `mirrorflags` renames only
+`deleted` on a local message (`is_local_box`) is both an override and the
+T flag: `hml tag` puts it in both lists and `mirror_flags` renames only
 the local rows, so hai, which reads files, skips it; `retag` derives
 `deleted` from a T. `hml recv` then removes the T files of every local
-box (`expungelocal`, cur/ and new/, as deep as `scanlocal`) — the local
+box (`expunge_local_boxes`, cur/ and new/, as deep as `scan_local_boxes`) — the local
 boxes have no server to expunge on. On an account `deleted` stays an
-override, as a T there would reach IMAP and its expunge. `mailparse` reads `Hai-Intent` into `msg.intent`
-(a column added by `ensureintent`, no backfill) and `retag` derives the
+override, as a T there would reach IMAP and its expunge. `mail_parse` reads `Hai-Intent` into `msg.intent`
+(a column added by `ensure_column`, no backfill) and `retag` derives the
 tag `hai:<intent>` from it, so `not tag:hai:tool-call` is the human
 view of a session. `hml show --entire-thread` expands the hits to every
 message of their threads in date order (one extra subquery in
-`showmain`). `postsend` is `hml new`, so local delivery is searchable
+`show_main`). `postsend` is `hml new`, so local delivery is searchable
 at once (the mtime gate keeps it at milliseconds).
 
 The gateway (gateway.c): the bus meets the outside through the
@@ -194,16 +194,16 @@ In-Reply-To/References names a logged crossing is a reply and goes to
 the bus address that sent that, stamped `Hai-Intent: answer` when the
 crossing was an `ask` (haid takes it as the answer; anything else is a
 turn, which is how haid treats inbox mail anyway). Either is rewritten
-into bus form (`busdeliver`: UTF-8 text/plain, no encoding, the first
-text/plain leaf via mime.c `mimeplain`, the quoted mail below the
-answer and phone signatures dropped by `unquote`, Message-ID kept) and
-delivered with `mddeliver`. Outbound, `hml send` delivering to
+into bus form (`bus_deliver`: UTF-8 text/plain, no encoding, the first
+text/plain leaf via mime.c `mime_plain_text`, the quoted mail below the
+answer and phone signatures dropped by `strip_quoted_reply`, Message-ID kept) and
+delivered with `maildir_deliver`. Outbound, `hml send` delivering to
 `gateway` (config.h, `user@hai`) a message that answers a logged
 crossing also submits it to the outside party through the crossing's
-account (`gwoutbound`: `From: "main@hai" <account>`, `Hai-*` headers
+account (`gateway_outbound`: `From: "main@hai" <account>`, `Hai-*` headers
 dropped, threading headers kept), and a bus message with an outside
 recipient (a question Cc'd to yourself) is logged so its replies come
-back. `smtpsubmit` is the SMTP session split out of `sendmain` for
+back. `smtp_submit` is the SMTP session split out of `send_main` for
 that; on the wire a bus `From:` becomes `"user@hai" <account>` and a
 missing Message-ID is synthesized (Gmail would otherwise assign one
 the log does not know). The crossing log `<mailroot>/.hroutes` (one
@@ -220,13 +220,13 @@ run live end to end (that needs a real mail sent to the route address).
 For main's own questions set hai's `askwait` above the sync interval,
 or the phone answer arrives after main stopped waiting and is dropped.
 
-`hml address` (query.c `addressmain`): To:/Cc: completion for MUAs.
+`hml address` (query.c `address_main`): To:/Cc: completion for MUAs.
 The FTS table is contentless, so recipients are kept readable in
-`msg.rcpt` (decoded To/Cc/Bcc, added by `ensurecol`; `fillrcpt` in
+`msg.rcpt` (decoded To/Cc/Bcc, added by `ensure_column`; `backfill_recipients` in
 `hml new` backfills Sent mail once, guarded by `meta(rcptfill)`). The
 typed words become an FTS prefix query over sender/rcpt for candidate
 messages; their mailboxes are tallied in C (split with mime.c
-`mimeaddrs`, shared with show.c), kept when every word is a substring
+`mime_split_addresses`, shared with show.c), kept when every word is a substring
 of `name addr`, ranked sent-to first, then by count, then recency.
 
 Next: per-folder connection fan-out, COMPRESS=DEFLATE, IDLE daemon mode.
@@ -257,7 +257,7 @@ Next: per-folder connection fan-out, COMPRESS=DEFLATE, IDLE daemon mode.
   ~30s while TLS/greeting stay instant. Not an hml bug; the real fix is
   the planned IDLE daemon (one long-lived connection instead of hundreds
   of logins). Gmail also drops long-lived connections mid-command now and
-  then; accountmain reconnects and retries the folder once.
+  then; account_thread reconnects and retries the folder once.
 
 The `attachment` tag: `msg.attach` is set at index time from
 `Mail.hasatt` (mime.c: disposition `attachment`, or a named non-text
@@ -265,7 +265,7 @@ leaf without `Content-ID`; `application/(x-)pkcs7-signature` and
 `pgp-signature` excluded), OR-ed over every file of a message (a
 duplicate delivery may lack the part), and `retag` derives the tag from
 it, so `tag:attachment` and what `hml show` frames as `\fattachment{`
-agree. An index from before the column gets it in `dbopen`'s `migrate`:
+agree. An index from before the column gets it in `db_open`'s `migrate`:
 `ALTER TABLE`, a broad mark from the FTS `attach` column (one prefix
 query over every initial character, no file touched), then `refine`
 parses the candidates — everything marked plus every multi-file message,
@@ -277,7 +277,7 @@ and signatures out, duplicate deliveries carrying the part in);
 notmuch misses (inline PDFs/TIFs, `encrypted.asc`), 4 it has that hml
 does not. Two bugs this surfaced: the backfill's Cyrillic prefix range
 was outside its loop bound (Macedonian-named attachments were all
-missed until the bound was raised), and `param()` took only the first
+missed until the bound was raised), and `parameter_value()` took only the first
 RFC 2231 continuation (`filename*0*=`), truncating long UTF-8 names and
 their extensions — it now joins `name*0*= name*1*= …` and decodes them
 with the charset of the first segment.
@@ -318,13 +318,13 @@ sanitizer builds ran clean). Guard every `qsort` on an stb array with
 - `sync.c` — the engine: three-way diff, merge, execution, `.hmlstate`.
 - `send.c` — `hml send`: sendmail-style argv/stdin handling, header/address
   parsing, SMTP dialogue (reuses the TLS transport and line reader).
-- `mime.c` — `mailparse`: the searchable text of one message (RFC 2047
+- `mime.c` — `mail_parse`: the searchable text of one message (RFC 2047
   headers, charset conversion via iconv, MIME walk, base64/QP, HTML
   stripped to text, attachment names, References). No dependencies
   beyond libc; threads call it concurrently.
 - `index.c` — `hml new`, `hml tag` and the schema: maildir diff,
   parallel parse, threading, derived tags + overrides, the tag log and
-  its replay, config.h rules. `dbopen` is shared with query.c.
+  its replay, config.h rules. `db_open` is shared with query.c.
 - `gateway.c` — the bus and the outside: routes and reply matching in
   `hml new`, the outbound copy in `hml send`, the crossing log.
 - `show.c` — `hml show` / `hml reply`: the messages behind a query,
@@ -332,10 +332,10 @@ sanitizer builds ran clean). Guard every `qsort` on an stb array with
   templates.
 - `query.c` — `hml search`/`count`/`tags`: the query parser (recursive
   descent, notmuch precedence: not > and > or, implicit and) compiled
-  to SQL with bound parameters (`querycompile`/`queryprep`, also used by
+  to SQL with bound parameters (`query_compile`/`query_prepare`, also used by
   index.c for rules and `hml tag`), and the notmuch-shaped text/JSON
   output.
-- `imap.c` — TCP+TLS transport (`tlsconnect` is protocol-neutral; SMTP uses
+- `imap.c` — TCP+TLS transport (`tls_connect` is protocol-neutral; SMTP uses
   it too), logical line reader (streams literals to a file sink with CRLF
   conversion), tagged commands, FETCH body, APPEND.
 - `state.c` / `maildir.c` — mbsync state + `.uidvalidity` read/write /

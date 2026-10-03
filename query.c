@@ -28,14 +28,14 @@ typedef struct {
     char *err;     /* first parse/compile error, malloc'd */
 } Parser;
 
-static void sadd(char **b, const char *t) {
+static void append_string(char **b, const char *t) {
     size_t n = strlen(t);
 
     if (n) /* memcpy(NULL, …, 0) is UB the optimizer builds on */
         memcpy(arraddnptr(*b, n), t, n);
 }
 
-static void seterr(char **err, const char *fmt, const char *arg) {
+static void set_error(char **err, const char *fmt, const char *arg) {
     char buf[256];
 
     if (*err)
@@ -47,7 +47,7 @@ static void seterr(char **err, const char *fmt, const char *arg) {
 /* --- parsing ----------------------------------------------------------- */
 
 /* one token: "(", ")", or a word (prefix:value, quotes kept); NULL at end */
-static char *token(Parser *p) {
+static char *next_token(Parser *p) {
     const char *s = p->s, *st;
     char *t;
     int q = 0;
@@ -75,17 +75,17 @@ static char *token(Parser *p) {
     return t;
 }
 
-static char *peek(Parser *p) {
+static char *peek_token(Parser *p) {
     const char *save = p->s;
-    char *t = token(p);
+    char *t = next_token(p);
 
     p->s = save;
     return t;
 }
 
-static int iskw(const char *t, const char *kw) { return t && !strcasecmp(t, kw); }
+static int is_keyword(const char *t, const char *kw) { return t && !strcasecmp(t, kw); }
 
-static Node *node(int op, Node *l, Node *r) {
+static Node *new_node(int op, Node *l, Node *r) {
     Node *n = calloc(1, sizeof *n);
 
     n->op = op;
@@ -94,8 +94,8 @@ static Node *node(int op, Node *l, Node *r) {
     return n;
 }
 
-static Node *term(char *t) {
-    Node *n = node(NTerm, NULL, NULL);
+static Node *new_term(char *t) {
+    Node *n = new_node(NTerm, NULL, NULL);
     char *colon = strchr(t, ':');
 
     /* a colon before any quote splits prefix from value */
@@ -108,95 +108,95 @@ static Node *term(char *t) {
     return n;
 }
 
-static Node *parseor(Parser *p);
+static Node *parse_or(Parser *p);
 
-static Node *parsenot(Parser *p) {
-    char *t = peek(p);
+static Node *parse_not(Parser *p) {
+    char *t = peek_token(p);
     Node *n;
 
     if (!t) {
-        seterr(&p->err, "unexpected end of query", "");
+        set_error(&p->err, "unexpected end of query", "");
         return NULL;
     }
-    if (iskw(t, "not")) {
+    if (is_keyword(t, "not")) {
         free(t);
-        free(token(p));
-        n = parsenot(p);
-        return n ? node(NNot, n, NULL) : NULL;
+        free(next_token(p));
+        n = parse_not(p);
+        return n ? new_node(NNot, n, NULL) : NULL;
     }
     if (!strcmp(t, "(")) {
         free(t);
-        free(token(p));
-        n = parseor(p);
-        t = token(p);
+        free(next_token(p));
+        n = parse_or(p);
+        t = next_token(p);
         if (!t || strcmp(t, ")")) {
-            seterr(&p->err, "missing )", "");
+            set_error(&p->err, "missing )", "");
             free(t);
             return n;
         }
         free(t);
         return n;
     }
-    if (!strcmp(t, ")") || iskw(t, "and") || iskw(t, "or")) {
-        seterr(&p->err, "unexpected '%s'", t);
+    if (!strcmp(t, ")") || is_keyword(t, "and") || is_keyword(t, "or")) {
+        set_error(&p->err, "unexpected '%s'", t);
         free(t);
         return NULL;
     }
     free(t);
-    return term(token(p));
+    return new_term(next_token(p));
 }
 
-static Node *parseand(Parser *p) {
-    Node *l = parsenot(p), *r;
+static Node *parse_and(Parser *p) {
+    Node *l = parse_not(p), *r;
     char *t;
 
-    while (l && (t = peek(p))) {
-        if (!strcmp(t, ")") || iskw(t, "or")) {
+    while (l && (t = peek_token(p))) {
+        if (!strcmp(t, ")") || is_keyword(t, "or")) {
             free(t);
             break;
         }
-        if (iskw(t, "and"))
-            free(token(p));
+        if (is_keyword(t, "and"))
+            free(next_token(p));
         free(t);
-        if (!(r = parsenot(p)))
+        if (!(r = parse_not(p)))
             break;
-        l = node(NAnd, l, r);
+        l = new_node(NAnd, l, r);
     }
     return l;
 }
 
-static Node *parseor(Parser *p) {
-    Node *l = parseand(p), *r;
+static Node *parse_or(Parser *p) {
+    Node *l = parse_and(p), *r;
     char *t;
 
-    while (l && (t = peek(p)) && iskw(t, "or")) {
+    while (l && (t = peek_token(p)) && is_keyword(t, "or")) {
         free(t);
-        free(token(p));
-        if (!(r = parseand(p)))
+        free(next_token(p));
+        if (!(r = parse_and(p)))
             break;
-        l = node(NOr, l, r);
+        l = new_node(NOr, l, r);
     }
     return l;
 }
 
-static Node *parse(const char *q, char **err) {
+static Node *parse_query(const char *q, char **err) {
     Parser p = {q, NULL};
-    Node *n = parseor(&p);
+    Node *n = parse_or(&p);
     char *t;
 
-    if (!p.err && (t = token(&p))) {
-        seterr(&p.err, "unexpected '%s'", t);
+    if (!p.err && (t = next_token(&p))) {
+        set_error(&p.err, "unexpected '%s'", t);
         free(t);
     }
     *err = p.err;
     return n;
 }
 
-static void freenode(Node *n) {
+static void free_node(Node *n) {
     if (!n)
         return;
-    freenode(n->l);
-    freenode(n->r);
+    free_node(n->l);
+    free_node(n->r);
     free(n->prefix);
     free(n->val);
     free(n);
@@ -205,7 +205,7 @@ static void freenode(Node *n) {
 /* --- dates ------------------------------------------------------------- */
 
 /* one end of a date: range; end=1 asks for the last second of the period */
-static int datepoint(const char *s, int end, long *out) {
+static int parse_date_point(const char *s, int end, long *out) {
     time_t now = time(NULL);
     struct tm tm;
     long n;
@@ -270,7 +270,7 @@ static int datepoint(const char *s, int end, long *out) {
     return 0;
 }
 
-static int daterange(const char *v, long *from, long *to) {
+static int parse_date_range(const char *v, long *from, long *to) {
     const char *dots = strstr(v, "..");
     char a[64], b[64];
 
@@ -283,13 +283,13 @@ static int daterange(const char *v, long *from, long *to) {
         if (isdigit((unsigned char)*v) && !isdigit((unsigned char)v[strlen(v) - 1]))
             b[0] = '\0'; /* "7d" alone means 7d..now */
     }
-    return datepoint(a, 0, from) < 0 || datepoint(b, 1, to) < 0 ? -1 : 0;
+    return parse_date_point(a, 0, from) < 0 || parse_date_point(b, 1, to) < 0 ? -1 : 0;
 }
 
 /* --- compiling --------------------------------------------------------- */
 
 /* an FTS5 MATCH expression for one term: col : "phrase" [*] */
-static char *ftsmatch(const char *col, const char *v) {
+static char *fts_match_expression(const char *col, const char *v) {
     char *m = NULL;
     size_t n = strlen(v);
     int prefix = 0;
@@ -303,8 +303,8 @@ static char *ftsmatch(const char *col, const char *v) {
         n -= 2;
     }
     if (col) {
-        sadd(&m, col);
-        sadd(&m, " : ");
+        append_string(&m, col);
+        append_string(&m, " : ");
     }
     arrput(m, '"');
     for (; n; n--, v++) {
@@ -319,14 +319,14 @@ static char *ftsmatch(const char *col, const char *v) {
     return m;
 }
 
-static void bindparam(Query *c, char *v) { /* takes ownership of v */
+static void bind_parameter(Query *c, char *v) { /* takes ownership of v */
     arrput(c->params, v);
-    sadd(&c->sql, "?");
+    append_string(&c->sql, "?");
 }
 
 /* an exact-match value may be written quoted (tag:"to do", notmuch's
  * habit for names with spaces): the quotes are not part of the value */
-static char *unquote(char *v) {
+static char *strip_quotes(char *v) {
     size_t k = strlen(v);
 
     if (k >= 2 && v[0] == '"' && v[k - 1] == '"') {
@@ -336,32 +336,32 @@ static char *unquote(char *v) {
     return v;
 }
 
-static void compterm(Query *c, const Node *n) {
+static void compile_term(Query *c, const Node *n) {
     const char *p = n->prefix, *v = n->val;
     char buf[64];
     long a, b;
 
     if (p && (!strcmp(p, "tag") || !strcmp(p, "id") || !strcmp(p, "thread") || !strcmp(p, "path") || !strcmp(p, "folder")))
-        v = unquote(n->val);
+        v = strip_quotes(n->val);
 
     if (!p && !strcmp(v, "*")) {
-        sadd(&c->sql, "1");
+        append_string(&c->sql, "1");
     } else if (!p || !strcmp(p, "subject") || !strcmp(p, "from") || !strcmp(p, "to") || !strcmp(p, "attachment") || !strcmp(p, "body")) {
         const char *col = !p ? NULL : !strcmp(p, "from") ? "sender" : !strcmp(p, "to") ? "rcpt" : !strcmp(p, "attachment") ? "attach" : p;
-        char *m = ftsmatch(col, v);
+        char *m = fts_match_expression(col, v);
         if (!strcmp(m, "\"\"") || strstr(m, ": \"\"")) {
-            seterr(&c->err, "empty search term", "");
+            set_error(&c->err, "empty search term", "");
             arrfree(m);
             return;
         }
-        sadd(&c->sql, "id IN (SELECT rowid FROM fts WHERE fts MATCH ");
-        bindparam(c, strdup(m));
-        sadd(&c->sql, ")");
+        append_string(&c->sql, "id IN (SELECT rowid FROM fts WHERE fts MATCH ");
+        bind_parameter(c, strdup(m));
+        append_string(&c->sql, ")");
         arrfree(m);
     } else if (!strcmp(p, "tag")) {
-        sadd(&c->sql, "id IN (SELECT msg FROM tag WHERE name=");
-        bindparam(c, strdup(v));
-        sadd(&c->sql, ")");
+        append_string(&c->sql, "id IN (SELECT msg FROM tag WHERE name=");
+        bind_parameter(c, strdup(v));
+        append_string(&c->sql, ")");
     } else if (!strcmp(p, "id")) {
         size_t k = strlen(v);
         char *m = strdup(v);
@@ -369,79 +369,79 @@ static void compterm(Query *c, const Node *n) {
             memmove(m, m + 1, k - 2);
             m[k - 2] = '\0';
         }
-        sadd(&c->sql, "mid=");
-        bindparam(c, m);
+        append_string(&c->sql, "mid=");
+        bind_parameter(c, m);
     } else if (!strcmp(p, "thread")) {
         snprintf(buf, sizeof buf, "thread=%llu", (unsigned long long)strtoull(v, NULL, 16));
-        sadd(&c->sql, buf);
+        append_string(&c->sql, buf);
     } else if (!strcmp(p, "path") || !strcmp(p, "folder")) {
         size_t k = strlen(v);
         if (!strcmp(v, "**") || !strcmp(v, "*")) {
-            sadd(&c->sql, "1");
+            append_string(&c->sql, "1");
         } else if (k > 2 && !strcmp(v + k - 2, "/*")) {
             /* one level down, not the whole subtree: the boxes
              * directly inside it, none of their own children */
-            sadd(&c->sql, "id IN (SELECT msg FROM file WHERE box GLOB ");
-            bindparam(c, strdup(v));
+            append_string(&c->sql, "id IN (SELECT msg FROM file WHERE box GLOB ");
+            bind_parameter(c, strdup(v));
             snprintf(buf, sizeof buf, " AND instr(substr(box,%zu),'/')=0)", k);
-            sadd(&c->sql, buf);
+            append_string(&c->sql, buf);
         } else if (k > 3 && !strcmp(v + k - 3, "/**")) {
             char *box = strdup(v), *glob = malloc(k);
             box[k - 3] = '\0';
             snprintf(glob, k, "%s/*", box);
-            sadd(&c->sql, "id IN (SELECT msg FROM file WHERE box=");
-            bindparam(c, box);
-            sadd(&c->sql, " OR box GLOB ");
-            bindparam(c, glob);
-            sadd(&c->sql, ")");
+            append_string(&c->sql, "id IN (SELECT msg FROM file WHERE box=");
+            bind_parameter(c, box);
+            append_string(&c->sql, " OR box GLOB ");
+            bind_parameter(c, glob);
+            append_string(&c->sql, ")");
         } else {
-            sadd(&c->sql, "id IN (SELECT msg FROM file WHERE box=");
-            bindparam(c, strdup(v));
-            sadd(&c->sql, ")");
+            append_string(&c->sql, "id IN (SELECT msg FROM file WHERE box=");
+            bind_parameter(c, strdup(v));
+            append_string(&c->sql, ")");
         }
     } else if (!strcmp(p, "date")) {
-        if (daterange(v, &a, &b) < 0) {
-            seterr(&c->err, "bad date '%s'", v);
+        if (parse_date_range(v, &a, &b) < 0) {
+            set_error(&c->err, "bad date '%s'", v);
             return;
         }
         snprintf(buf, sizeof buf, "date BETWEEN %ld AND %ld", a, b);
-        sadd(&c->sql, buf);
+        append_string(&c->sql, buf);
     } else
-        seterr(&c->err, "unknown prefix '%s:'", p);
+        set_error(&c->err, "unknown prefix '%s:'", p);
 }
 
-static void compile(Query *c, const Node *n) {
+static void compile_node(Query *c, const Node *n) {
     switch (n->op) {
     case NTerm:
-        compterm(c, n);
+        compile_term(c, n);
         break;
     case NNot:
-        sadd(&c->sql, "NOT (");
-        compile(c, n->l);
-        sadd(&c->sql, ")");
+        append_string(&c->sql, "NOT (");
+        compile_node(c, n->l);
+        append_string(&c->sql, ")");
         break;
     default:
-        sadd(&c->sql, "(");
-        compile(c, n->l);
-        sadd(&c->sql, n->op == NAnd ? " AND " : " OR ");
-        compile(c, n->r);
-        sadd(&c->sql, ")");
+        append_string(&c->sql, "(");
+        compile_node(c, n->l);
+        append_string(&c->sql, n->op == NAnd ? " AND " : " OR ");
+        compile_node(c, n->r);
+        append_string(&c->sql, ")");
     }
 }
 
 /* query text -> WHERE expression over msg; -1 with a message on error */
-int querycompile(const char *q, Query *c, char **err) {
-    Node *n = parse(q, err);
+int query_compile(const char *q, Query *c, char **err) {
+    Node *n = parse_query(q, err);
 
     memset(c, 0, sizeof *c);
     if (!n || *err) {
         if (!*err)
             *err = strdup("empty query");
-        freenode(n);
+        free_node(n);
         return -1;
     }
-    compile(c, n);
-    freenode(n);
+    compile_node(c, n);
+    free_node(n);
     arrput(c->sql, '\0');
     if (c->err) {
         *err = c->err;
@@ -451,7 +451,7 @@ int querycompile(const char *q, Query *c, char **err) {
     return 0;
 }
 
-void queryfree(Query *c) {
+void query_free(Query *c) {
     ptrdiff_t i;
 
     for (i = 0; i < arrlen(c->params); i++)
@@ -461,19 +461,19 @@ void queryfree(Query *c) {
 }
 
 /* prepare sql with the query's WHERE spliced in at "%s", params bound */
-sqlite3_stmt *queryprep(sqlite3 *db, const char *fmt, const Query *c, const char *tail, char **err) {
+sqlite3_stmt *query_prepare(sqlite3 *db, const char *fmt, const Query *c, const char *tail, char **err) {
     char *sql = NULL;
     sqlite3_stmt *st;
     const char *pct = strstr(fmt, "%s");
     ptrdiff_t i;
 
     memcpy(arraddnptr(sql, pct - fmt), fmt, (size_t)(pct - fmt));
-    sadd(&sql, c->sql);
-    sadd(&sql, pct + 2);
-    sadd(&sql, tail);
+    append_string(&sql, c->sql);
+    append_string(&sql, pct + 2);
+    append_string(&sql, tail);
     arrput(sql, '\0');
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
-        seterr(err, "%s", sqlite3_errmsg(db));
+        set_error(err, "%s", sqlite3_errmsg(db));
         arrfree(sql);
         return NULL;
     }
@@ -485,7 +485,7 @@ sqlite3_stmt *queryprep(sqlite3 *db, const char *fmt, const Query *c, const char
 
 /* --- output helpers ---------------------------------------------------- */
 
-static void jsonstr(const char *s) {
+static void print_json_string(const char *s) {
     putchar('"');
     for (; *s; s++) {
         unsigned char c = (unsigned char)*s;
@@ -500,7 +500,7 @@ static void jsonstr(const char *s) {
 }
 
 /* the display name of a From header, or its address */
-void dispname(const char *from, char *out, size_t cap) {
+void display_name(const char *from, char *out, size_t cap) {
     const char *lt = strchr(from, '<'), *s = from, *e;
     size_t n;
 
@@ -528,7 +528,7 @@ void dispname(const char *from, char *out, size_t cap) {
 
 /* notmuch's relative dates: "Today 10:12", "Yest. 21:12", "Mon. 10:12",
  * "August 21", "2025-08-21" */
-void reldate(long t, char *out, size_t cap) {
+void relative_date(long t, char *out, size_t cap) {
     time_t now = time(NULL), tt = t;
     struct tm tm, tn;
     char day[16];
@@ -569,21 +569,21 @@ typedef struct {
     int batch; /* count: one query per stdin line */
 } Opts;
 
-static int cmpnewest(const void *a, const void *b) {
+static int compare_newest(const void *a, const void *b) {
     const Thread *x = a, *y = b;
     return x->newest < y->newest ? 1 : x->newest > y->newest ? -1 : 0;
 }
 
-static int cmpoldest(const void *a, const void *b) {
+static int compare_oldest(const void *a, const void *b) {
     const Thread *x = a, *y = b;
     return x->oldest > y->oldest ? 1 : x->oldest < y->oldest ? -1 : 0;
 }
 
-static void addauthor(Thread *t, const char *from) {
+static void add_author(Thread *t, const char *from) {
     char name[128];
     size_t n = strlen(t->authors ? t->authors : "");
 
-    dispname(from, name, sizeof name);
+    display_name(from, name, sizeof name);
     if (n) { /* already listed? */
         const char *p = t->authors;
         size_t k = strlen(name);
@@ -593,13 +593,13 @@ static void addauthor(Thread *t, const char *from) {
             p++;
         }
         arrsetlen(t->authors, arrlen(t->authors) - 1);
-        sadd(&t->authors, ", ");
+        append_string(&t->authors, ", ");
     }
-    sadd(&t->authors, name);
+    append_string(&t->authors, name);
     arrput(t->authors, '\0');
 }
 
-static void threadtags(sqlite3 *db, const Thread *t, char ***tags) {
+static void thread_tags(sqlite3 *db, const Thread *t, char ***tags) {
     sqlite3_stmt *st;
     ptrdiff_t i, k;
 
@@ -619,16 +619,16 @@ static void threadtags(sqlite3 *db, const Thread *t, char ***tags) {
     sqlite3_finalize(st);
 }
 
-static int cmpstr(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static int compare_strings(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
-static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
+static int print_summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     sqlite3_stmt *st, *total;
     Thread *ts = NULL, *t;
     ptrdiff_t i, k, n;
     int json = !strcmp(o->format, "json"), threadsonly, rc;
     char date[32];
 
-    if (!(st = queryprep(db, "SELECT id,thread,date,sender,subject FROM msg WHERE %s", c, " ORDER BY thread,date", err)))
+    if (!(st = query_prepare(db, "SELECT id,thread,date,sender,subject FROM msg WHERE %s", c, " ORDER BY thread,date", err)))
         return -1;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         sqlite3_int64 id = sqlite3_column_int64(st, 0);
@@ -643,7 +643,7 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
         t = &arrlast(ts);
         t->matched++;
         arrput(t->ids, id);
-        addauthor(t, from);
+        add_author(t, from);
         /* the subject shown is the message the sort order puts first */
         if (d >= t->newest || !t->subject) {
             t->newest = d;
@@ -657,13 +657,13 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     }
     sqlite3_finalize(st);
     if (rc != SQLITE_DONE) {
-        seterr(err, "%s", sqlite3_errmsg(db));
+        set_error(err, "%s", sqlite3_errmsg(db));
         return -1;
     }
     /* never qsort an empty stb array: its NULL base is a nonnull argument
      * and GCC then deletes arrlen's own NULL check downstream (-O2) */
     if (arrlen(ts) > 1)
-        qsort(ts, (size_t)arrlen(ts), sizeof *ts, o->oldest ? cmpoldest : cmpnewest);
+        qsort(ts, (size_t)arrlen(ts), sizeof *ts, o->oldest ? compare_oldest : compare_newest);
     n = arrlen(ts);
     if (o->offset < n)
         n -= o->offset;
@@ -690,24 +690,24 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
         sqlite3_bind_int64(total, 1, t->thread);
         tot = sqlite3_step(total) == SQLITE_ROW ? sqlite3_column_int(total, 0) : t->matched;
         sqlite3_reset(total);
-        threadtags(db, t, &tags);
+        thread_tags(db, t, &tags);
         if (arrlen(tags) > 1)
-            qsort(tags, (size_t)arrlen(tags), sizeof *tags, cmpstr);
-        reldate(o->oldest ? t->oldest : t->newest, date, sizeof date);
+            qsort(tags, (size_t)arrlen(tags), sizeof *tags, compare_strings);
+        relative_date(o->oldest ? t->oldest : t->newest, date, sizeof date);
         if (json) {
             printf(i ? ",\n{" : "\n{");
             printf("\"thread\": \"%016llx\", \"timestamp\": %ld, "
                    "\"date_relative\": ",
                    (unsigned long long)t->thread, o->oldest ? t->oldest : t->newest);
-            jsonstr(date);
+            print_json_string(date);
             printf(", \"matched\": %d, \"total\": %d, \"authors\": ", t->matched, tot);
-            jsonstr(t->authors);
+            print_json_string(t->authors);
             printf(", \"subject\": ");
-            jsonstr(t->subject);
+            print_json_string(t->subject);
             printf(", \"tags\": [");
             for (k = 0; k < arrlen(tags); k++) {
                 printf(k ? ", " : "");
-                jsonstr(tags[k]);
+                print_json_string(tags[k]);
             }
             printf("]}");
         } else {
@@ -734,17 +734,17 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
 
 /* the absolute path of a maildir file the index knows as (box, sub, name);
  * 0 when the box belongs to an account that is no longer configured */
-int filepath(const char *box, const char *sub, const char *name, char *out, size_t cap) {
+int file_path(const char *box, const char *sub, const char *name, char *out, size_t cap) {
     char dir[4096];
 
-    if (!boxroot(box, dir, sizeof dir))
+    if (!box_directory(box, dir, sizeof dir))
         return 0;
     snprintf(out, cap, "%s/%s/%s", dir, sub, name);
     return 1;
 }
 
 /* messages / files / tags: one string per line, or a JSON array */
-static int listing(sqlite3 *db, const Query *c, const Opts *o, char **err) {
+static int print_listing(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     sqlite3_stmt *st;
     char tail[128], line[8192];
     const char *sql;
@@ -764,17 +764,17 @@ static int listing(sqlite3 *db, const Query *c, const Opts *o, char **err) {
         sql = "SELECT DISTINCT name FROM tag WHERE msg IN (SELECT id FROM msg"
               " WHERE %s) ORDER BY name";
     } else {
-        seterr(err, "unknown output '%s'", o->output);
+        set_error(err, "unknown output '%s'", o->output);
         return -1;
     }
-    if (!(st = queryprep(db, sql, c, tail, err)))
+    if (!(st = query_prepare(db, sql, c, tail, err)))
         return -1;
     if (json)
         putchar('[');
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         const char *s = (const char *)sqlite3_column_text(st, 0);
         if (files) {
-            if (!filepath(s, (const char *)sqlite3_column_text(st, 1), (const char *)sqlite3_column_text(st, 2), line, sizeof line))
+            if (!file_path(s, (const char *)sqlite3_column_text(st, 1), (const char *)sqlite3_column_text(st, 2), line, sizeof line))
                 continue; /* box of an account no longer configured */
             s = line;
         } else if (!strcmp(o->output, "messages") && !json) {
@@ -783,7 +783,7 @@ static int listing(sqlite3 *db, const Query *c, const Opts *o, char **err) {
         }
         if (json) {
             printf(i ? ",\n" : "\n");
-            jsonstr(s);
+            print_json_string(s);
         } else
             puts(s);
         i++;
@@ -792,14 +792,14 @@ static int listing(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     if (json)
         puts(i ? "\n]" : "]");
     if (rc != SQLITE_DONE) {
-        seterr(err, "%s", sqlite3_errmsg(db));
+        set_error(err, "%s", sqlite3_errmsg(db));
         return -1;
     }
     return 0;
 }
 
 /* --output=X / --limit=N style options; the rest joined is the query */
-static char *getopts(int argc, char **argv, Opts *o, const char *cmd) {
+static char *parse_options(int argc, char **argv, Opts *o, const char *cmd) {
     char *q = NULL;
     int i;
 
@@ -808,8 +808,8 @@ static char *getopts(int argc, char **argv, Opts *o, const char *cmd) {
         if (!strcmp(a, "--")) { /* end of options: the rest is the query */
             for (i++; i < argc; i++) {
                 if (q)
-                    sadd(&q, " ");
-                sadd(&q, argv[i]);
+                    append_string(&q, " ");
+                append_string(&q, argv[i]);
             }
             break;
         }
@@ -830,8 +830,8 @@ static char *getopts(int argc, char **argv, Opts *o, const char *cmd) {
             return NULL;
         } else {
             if (q)
-                sadd(&q, " ");
-            sadd(&q, a);
+                append_string(&q, " ");
+            append_string(&q, a);
         }
     }
     if (!q)
@@ -847,14 +847,14 @@ static int fail(const char *cmd, char *err) {
     return 2;
 }
 
-int searchmain(int argc, char **argv) {
+int search_main(int argc, char **argv) {
     Opts o = {"summary", "text", -1, 0, 0, 0};
     Query c;
     sqlite3 *db;
     char *q, *err = NULL, dberr[256];
     int rc;
 
-    if (!(q = getopts(argc, argv, &o, "search")))
+    if (!(q = parse_options(argc, argv, &o, "search")))
         return 2;
     if (!*q) {
         fputs("usage: hml search [--output=summary|threads|messages|files|"
@@ -864,56 +864,56 @@ int searchmain(int argc, char **argv) {
         arrfree(q);
         return 2;
     }
-    if (querycompile(q, &c, &err) < 0) {
+    if (query_compile(q, &c, &err) < 0) {
         arrfree(q);
         return fail("search", err);
     }
     arrfree(q);
-    if (!(db = dbopen(dberr, sizeof dberr))) {
-        queryfree(&c);
+    if (!(db = db_open(dberr, sizeof dberr))) {
+        query_free(&c);
         return fail("search", strdup(dberr));
     }
     if (!strcmp(o.output, "summary") || !strcmp(o.output, "threads"))
-        rc = summary(db, &c, &o, &err);
+        rc = print_summary(db, &c, &o, &err);
     else
-        rc = listing(db, &c, &o, &err);
-    queryfree(&c);
+        rc = print_listing(db, &c, &o, &err);
+    query_free(&c);
     sqlite3_close(db);
     return rc < 0 ? fail("search", err) : 0;
 }
 
 /* one count for query q on stdout; -1 with err set on failure */
-static int count1(sqlite3 *db, const char *sql, const char *q, char **err) {
+static int print_count(sqlite3 *db, const char *sql, const char *q, char **err) {
     Query c;
     sqlite3_stmt *st;
 
-    if (querycompile(q, &c, err) < 0)
+    if (query_compile(q, &c, err) < 0)
         return -1;
-    if (!(st = queryprep(db, sql, &c, "", err)) || sqlite3_step(st) != SQLITE_ROW) {
-        seterr(err, "%s", sqlite3_errmsg(db));
-        queryfree(&c);
+    if (!(st = query_prepare(db, sql, &c, "", err)) || sqlite3_step(st) != SQLITE_ROW) {
+        set_error(err, "%s", sqlite3_errmsg(db));
+        query_free(&c);
         return -1;
     }
     printf("%lld\n", (long long)sqlite3_column_int64(st, 0));
     sqlite3_finalize(st);
-    queryfree(&c);
+    query_free(&c);
     return 0;
 }
 
 /* hml count [--batch] [--output=...] <query>; with --batch every stdin
  * line is a query and gets its own count line (notmuch's --batch) */
-int countmain(int argc, char **argv) {
+int count_main(int argc, char **argv) {
     Opts o = {"messages", "text", -1, 0, 0, 0};
     sqlite3 *db;
     const char *sql;
     char *q, *err = NULL, dberr[256], line[8192];
 
-    if (!(q = getopts(argc, argv, &o, "count")))
+    if (!(q = parse_options(argc, argv, &o, "count")))
         return 2;
     if (!*q) {
         arrfree(q);
         q = NULL;
-        sadd(&q, "*");
+        append_string(&q, "*");
         arrput(q, '\0');
     }
     if (!strcmp(o.output, "threads"))
@@ -923,7 +923,7 @@ int countmain(int argc, char **argv) {
               " WHERE %s)";
     else
         sql = "SELECT COUNT(*) FROM msg WHERE %s";
-    if (!(db = dbopen(dberr, sizeof dberr))) {
+    if (!(db = db_open(dberr, sizeof dberr))) {
         arrfree(q);
         return fail("count", strdup(dberr));
     }
@@ -932,13 +932,13 @@ int countmain(int argc, char **argv) {
             size_t n = strlen(line);
             while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
                 line[--n] = '\0';
-            if (count1(db, sql, n ? line : "*", &err) < 0) {
+            if (print_count(db, sql, n ? line : "*", &err) < 0) {
                 arrfree(q);
                 sqlite3_close(db);
                 return fail("count", err);
             }
         }
-    } else if (count1(db, sql, q, &err) < 0) {
+    } else if (print_count(db, sql, q, &err) < 0) {
         arrfree(q);
         sqlite3_close(db);
         return fail("count", err);
@@ -949,33 +949,33 @@ int countmain(int argc, char **argv) {
 }
 
 /* every tag in the index, or those of the messages matching a query */
-int tagsmain(int argc, char **argv) {
+int tags_main(int argc, char **argv) {
     Opts o = {"tags", "text", -1, 0, 0, 0};
     Query c;
     sqlite3 *db;
     char *q, *err = NULL, dberr[256];
     int rc;
 
-    if (!(q = getopts(argc, argv, &o, "tags")))
+    if (!(q = parse_options(argc, argv, &o, "tags")))
         return 2;
     o.output = "tags";
     if (!*q) {
         arrfree(q);
         q = NULL;
-        sadd(&q, "*");
+        append_string(&q, "*");
         arrput(q, '\0');
     }
-    if (querycompile(q, &c, &err) < 0) {
+    if (query_compile(q, &c, &err) < 0) {
         arrfree(q);
         return fail("tags", err);
     }
     arrfree(q);
-    if (!(db = dbopen(dberr, sizeof dberr))) {
-        queryfree(&c);
+    if (!(db = db_open(dberr, sizeof dberr))) {
+        query_free(&c);
         return fail("tags", strdup(dberr));
     }
-    rc = listing(db, &c, &o, &err);
-    queryfree(&c);
+    rc = print_listing(db, &c, &o, &err);
+    query_free(&c);
     sqlite3_close(db);
     return rc < 0 ? fail("tags", err) : 0;
 }
@@ -997,7 +997,7 @@ typedef struct {
 
 /* runs of letters/digits (any non-ASCII byte counts), lowercased — the
  * words FTS5's unicode61 tokenizer would make of the typed text */
-static char **words(char *s) {
+static char **split_words(char *s) {
     char **w = NULL, *p;
 
     for (p = s; *p;) {
@@ -1016,7 +1016,7 @@ static char **words(char *s) {
 }
 
 /* the display name of a mailbox, quotes stripped; "" when there is none */
-static void boxname(const char *m, char *out, size_t cap) {
+static void mailbox_name(const char *m, char *out, size_t cap) {
     const char *lt = strchr(m, '<'), *e = lt ? lt : m;
     size_t n = 0;
 
@@ -1035,7 +1035,7 @@ static void boxname(const char *m, char *out, size_t cap) {
 
 /* addresses no person reads: bounce handlers, no-reply senders and
  * notification relays (whose display name is whoever triggered one) */
-static int machine(const char *bare) {
+static int is_machine_address(const char *bare) {
     static const char *const bad[] = {"bounce", "noreply", "no-reply", "no_reply", "donotreply", "do-not-reply", "mailer-daemon", "notification"};
     const char *at = strchr(bare, '@');
     char local[256];
@@ -1048,18 +1048,18 @@ static int machine(const char *bare) {
     return 0;
 }
 
-static void tally(AddrKV **h, char **ws, const char *list, int sent, long date) {
+static void tally_addresses(AddrKV **h, char **ws, const char *list, int sent, long date) {
     char **l = NULL, bare[256], name[256], hay[520];
     ptrdiff_t i, j;
     int k;
 
-    mimeaddrs(list, &l);
+    mime_split_addresses(list, &l);
     for (i = 0; i < arrlen(l); i++) {
         Addr *a;
-        mimeaddr(l[i], bare, sizeof bare);
-        boxname(l[i], name, sizeof name);
+        mime_bare_address(l[i], bare, sizeof bare);
+        mailbox_name(l[i], name, sizeof name);
         free(l[i]);
-        if (!strchr(bare, '@') || strpbrk(bare, " \t,;<>\"") || machine(bare))
+        if (!strchr(bare, '@') || strpbrk(bare, " \t,;<>\"") || is_machine_address(bare))
             continue;
         for (k = 0; k < naccounts && strcasecmp(bare, accounts[k].user); k++)
             ;
@@ -1091,7 +1091,7 @@ static void tally(AddrKV **h, char **ws, const char *list, int sent, long date) 
 
 /* people we wrote to first (most often, then most recently), then the
  * ones who only wrote to us */
-static int addrcmp(const void *x, const void *y) {
+static int compare_addresses(const void *x, const void *y) {
     const Addr *a = &((const AddrKV *)x)->value, *b = &((const AddrKV *)y)->value;
 
     if ((a->sent > 0) != (b->sent > 0))
@@ -1104,7 +1104,7 @@ static int addrcmp(const void *x, const void *y) {
 /* hml address [--limit=N] [--] [words]: the addresses we correspond with
  * whose name or address contains every word, as ready-to-paste
  * mailboxes; no words = everyone we ever sent to */
-int addressmain(int argc, char **argv) {
+int address_main(int argc, char **argv) {
     AddrKV *h = NULL;
     sqlite3 *db;
     sqlite3_stmt *st;
@@ -1125,22 +1125,22 @@ int addressmain(int argc, char **argv) {
         }
     }
     for (; k < argc; k++) {
-        sadd(&text, argv[k]);
+        append_string(&text, argv[k]);
         arrput(text, ' ');
     }
     arrput(text, '\0');
-    ws = words(text);
+    ws = split_words(text);
     if (arrlen(ws)) {
-        sadd(&match, "{sender rcpt} : (");
+        append_string(&match, "{sender rcpt} : (");
         for (i = 0; i < arrlen(ws); i++) {
-            sadd(&match, i ? " \"" : "\"");
-            sadd(&match, ws[i]);
-            sadd(&match, "\"*");
+            append_string(&match, i ? " \"" : "\"");
+            append_string(&match, ws[i]);
+            append_string(&match, "\"*");
         }
-        sadd(&match, ")");
+        append_string(&match, ")");
     }
     arrput(match, '\0');
-    if (!(db = dbopen(dberr, sizeof dberr)))
+    if (!(db = db_open(dberr, sizeof dberr)))
         return fail("address", strdup(dberr));
     if (sqlite3_prepare_v2(db,
                            arrlen(ws) ? "SELECT sender,rcpt,date,id IN (SELECT msg FROM tag"
@@ -1162,12 +1162,12 @@ int addressmain(int argc, char **argv) {
         /* what we sent counts its recipients; what we got counts its
          * sender and the others it went to */
         if (!sent)
-            tally(&h, ws, (const char *)sqlite3_column_text(st, 0), 0, date);
-        tally(&h, ws, (const char *)sqlite3_column_text(st, 1), sent, date);
+            tally_addresses(&h, ws, (const char *)sqlite3_column_text(st, 0), 0, date);
+        tally_addresses(&h, ws, (const char *)sqlite3_column_text(st, 1), sent, date);
     }
     sqlite3_finalize(st);
     sqlite3_close(db);
-    qsort(h, (size_t)shlen(h), sizeof *h, addrcmp);
+    qsort(h, (size_t)shlen(h), sizeof *h, compare_addresses);
     for (i = 0; i < shlen(h); i++) {
         const char *n = h[i].value.name;
         if (i < limit || limit < 0) {

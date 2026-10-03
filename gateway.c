@@ -42,22 +42,22 @@ typedef struct {
     char *local, *remote, *account, *intent;
 } Crossing;
 
-static void logpath(char *dst, size_t cap) {
+static void crossing_log_path(char *dst, size_t cap) {
     size_t n;
 
-    expand(mailroot, dst, cap);
+    expand_home(mailroot, dst, cap);
     n = strlen(dst);
     snprintf(dst + n, cap - n, "/.hroutes");
 }
 
-static void setfields(Crossing *c, char **f) {
+static void crossing_set_fields(Crossing *c, char **f) {
     c->local = strdup(f[1]);
     c->remote = strdup(f[2]);
     c->account = strdup(f[3]);
     c->intent = strdup(f[4]);
 }
 
-static void freefields(Crossing *c) {
+static void crossing_free_fields(Crossing *c) {
     free(c->local);
     free(c->remote);
     free(c->account);
@@ -65,13 +65,13 @@ static void freefields(Crossing *c) {
 }
 
 /* the log as a map by Message-ID; a later line for the same id wins */
-static Crossing *logread(void) {
+static Crossing *crossing_log_read(void) {
     Crossing *log = NULL;
     char path[4096], line[8192];
     FILE *f;
 
     sh_new_strdup(log);
-    logpath(path, sizeof path);
+    crossing_log_path(path, sizeof path);
     if (!(f = fopen(path, "r")))
         return log;
     while (fgets(line, sizeof line, f)) {
@@ -89,27 +89,27 @@ static Crossing *logread(void) {
         if (i < 5)
             continue;
         if ((old = shgetp_null(log, fld[0]))) {
-            freefields(old);
-            setfields(old, fld);
+            crossing_free_fields(old);
+            crossing_set_fields(old, fld);
             continue;
         }
         c.key = fld[0];
-        setfields(&c, fld);
+        crossing_set_fields(&c, fld);
         shputs(log, c);
     }
     fclose(f);
     return log;
 }
 
-static void logfree(Crossing *log) {
+static void crossing_log_free(Crossing *log) {
     ptrdiff_t i;
 
     for (i = 0; i < shlen(log); i++)
-        freefields(&log[i]);
+        crossing_free_fields(&log[i]);
     shfree(log);
 }
 
-int gwlogadd(const char *mid, const char *local, const char *remote, const char *account, const char *intent) {
+int gateway_log_add(const char *mid, const char *local, const char *remote, const char *account, const char *intent) {
     const char *f[5] = {mid, local, remote, account, intent};
     char path[4096], *buf = NULL;
     size_t n, o = 0;
@@ -121,7 +121,7 @@ int gwlogadd(const char *mid, const char *local, const char *remote, const char 
             arrput(buf, *s == '\t' || *s == '\n' || *s == '\r' ? ' ' : *s);
         arrput(buf, i < 4 ? '\t' : '\n');
     }
-    logpath(path, sizeof path);
+    crossing_log_path(path, sizeof path);
     if ((fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0600)) < 0) {
         arrfree(buf);
         return -1;
@@ -144,7 +144,7 @@ int gwlogadd(const char *mid, const char *local, const char *remote, const char 
 
 /* --- ids ---------------------------------------------------------------- */
 
-char *gwid(const char *v) {
+char *gateway_message_id(const char *v) {
     const char *lt = strchr(v, '<'), *gt;
 
     if (lt && (gt = strchr(lt, '>')))
@@ -155,14 +155,14 @@ char *gwid(const char *v) {
 }
 
 /* every <...> of v, in order */
-static void idsof(const char *v, char ***out) {
+static void collect_message_ids(const char *v, char ***out) {
     const char *lt, *gt;
 
     for (; (lt = strchr(v, '<')) && (gt = strchr(lt, '>')); v = gt + 1)
         arrput(*out, strndup(lt + 1, (size_t)(gt - lt - 1)));
 }
 
-static void freeids(char **ids) {
+static void free_message_ids(char **ids) {
     ptrdiff_t i;
 
     for (i = 0; i < arrlen(ids); i++)
@@ -172,32 +172,32 @@ static void freeids(char **ids) {
 
 /* the crossing a message answers: what In-Reply-To names if that
  * crossed, else the nearest logged ancestor in References */
-static Crossing *answers(Crossing *log, Hdr *h) {
+static Crossing *answered_crossing(Crossing *log, Hdr *h) {
     char *v, **ids = NULL;
     Crossing *c = NULL;
     ptrdiff_t i;
 
-    if ((v = mimehget(h, "In-Reply-To"))) {
-        idsof(v, &ids);
+    if ((v = mime_header_get(h, "In-Reply-To"))) {
+        collect_message_ids(v, &ids);
         free(v);
         for (i = 0; i < arrlen(ids) && !c; i++)
             c = shgetp_null(log, ids[i]);
-        freeids(ids);
+        free_message_ids(ids);
         ids = NULL;
     }
-    if (!c && (v = mimehget(h, "References"))) {
-        idsof(v, &ids);
+    if (!c && (v = mime_header_get(h, "References"))) {
+        collect_message_ids(v, &ids);
         free(v);
         for (i = arrlen(ids) - 1; i >= 0 && !c; i--)
             c = shgetp_null(log, ids[i]);
-        freeids(ids);
+        free_message_ids(ids);
     }
     return c;
 }
 
 /* --- inbound: outside mail rewritten for the bus ------------------------ */
 
-static char *slurp(const char *path, size_t *n) {
+static char *read_file(const char *path, size_t *n) {
     struct stat sb;
     char *buf;
     FILE *f;
@@ -214,7 +214,7 @@ static char *slurp(const char *path, size_t *n) {
     return buf;
 }
 
-static int endswith(const char *s, size_t n, const char *t) {
+static int ends_with(const char *s, size_t n, const char *t) {
     size_t k = strlen(t);
 
     return n >= k && !memcmp(s + n - k, t, k);
@@ -225,7 +225,7 @@ static int endswith(const char *s, size_t n, const char *t) {
  * separator on, everything is dropped, an attribution wrapped onto the
  * lines before a quote with it; then trailing blank lines. CRs go too.
  * A reply that was all quote keeps its text. In place. */
-static void unquote(char *s) {
+static void strip_quoted_reply(char *s) {
     char *orig = strdup(s), *out = s, *line, *nl, *e;
     size_t n;
     int quoted = 0;
@@ -240,7 +240,7 @@ static void unquote(char *s) {
             quoted = 1;
             break;
         }
-        if (n > 9 && !strncmp(line, "On ", 3) && endswith(line, n, "wrote:"))
+        if (n > 9 && !strncmp(line, "On ", 3) && ends_with(line, n, "wrote:"))
             break;
         memmove(out, line, n);
         out += n;
@@ -254,7 +254,7 @@ static void unquote(char *s) {
         line = e;
         while (line > s && line[-1] != '\n')
             line--;
-        if (endswith(line, (size_t)(e - line), "wrote:")) {
+        if (ends_with(line, (size_t)(e - line), "wrote:")) {
             e = line;
             while (e > s && e[-1] == '\n')
                 e--;
@@ -275,12 +275,12 @@ static void unquote(char *s) {
 }
 
 /* header value on one line, RFC 2047 decoded */
-static char *hdrline(Hdr *h, const char *name) {
-    char *v = mimehget(h, name), *d, *p;
+static char *header_line(Hdr *h, const char *name) {
+    char *v = mime_header_get(h, name), *d, *p;
 
     if (!v)
         return NULL;
-    d = mimedecode(v);
+    d = mime_decode_header(v);
     free(v);
     for (p = d; *p; p++)
         if (*p == '\n' || *p == '\r')
@@ -292,7 +292,7 @@ static char *hdrline(Hdr *h, const char *name) {
  * maildir of the local address; intent, when given, is its Hai-Intent.
  * With expect set, a sender other than that address is refused. from
  * receives the bare sender address. */
-static int busdeliver(const char *path, const char *to, const char *intent, const char *expect, char *from, size_t fromcap, char *err, size_t errlen) {
+static int bus_deliver(const char *path, const char *to, const char *intent, const char *expect, char *from, size_t fromcap, char *err, size_t errlen) {
     static const char *const keep[] = {"Date", "Message-ID", "In-Reply-To", "References"};
     const char *at = strrchr(to, '@');
     size_t n, lp = at ? (size_t)(at - to) : strlen(to), i;
@@ -300,32 +300,32 @@ static int busdeliver(const char *path, const char *to, const char *intent, cons
     Hdr *h = NULL;
     FILE *f;
 
-    if (!(buf = slurp(path, &n))) {
+    if (!(buf = read_file(path, &n))) {
         snprintf(err, errlen, "cannot read %.200s", path);
         return -1;
     }
-    mimehdrs(buf, n, &h);
-    v = hdrline(h, "From");
-    mimeaddr(v ? v : "", from, fromcap);
+    mime_parse_headers(buf, n, &h);
+    v = header_line(h, "From");
+    mime_bare_address(v ? v : "", from, fromcap);
     if (expect && strcasecmp(from, expect)) {
         snprintf(err, errlen, "reply from %.100s to a crossing of %.100s ignored", from, expect);
         goto fail;
     }
-    expand(localbox, root, sizeof root);
+    expand_home(localbox, root, sizeof root);
     snprintf(dir, sizeof dir, "%s/%.*s", root, (int)lp, to);
-    if (mdensure(dir, err, errlen) < 0)
+    if (maildir_create(dir, err, errlen) < 0)
         goto fail;
-    mdtmp(tmp, sizeof tmp, dir);
+    maildir_temp_path(tmp, sizeof tmp, dir);
     if (!(f = fopen(tmp, "w"))) {
         snprintf(err, errlen, "cannot create %.200s", tmp);
         goto fail;
     }
     fprintf(f, "From: %s\nTo: %s\n", v ? v : "", to);
     free(v);
-    v = hdrline(h, "Subject");
+    v = header_line(h, "Subject");
     fprintf(f, "Subject: %s\n", v ? v : "");
     free(v);
-    if (!(v = mimehget(h, "Date"))) {
+    if (!(v = mime_header_get(h, "Date"))) {
         time_t now = time(NULL);
         char d[64];
         strftime(d, sizeof d, "%a, %d %b %Y %H:%M:%S %z", localtime(&now));
@@ -333,7 +333,7 @@ static int busdeliver(const char *path, const char *to, const char *intent, cons
     }
     free(v);
     for (i = 0; i < sizeof keep / sizeof *keep; i++) {
-        if ((v = mimehget(h, keep[i])))
+        if ((v = mime_header_get(h, keep[i])))
             fprintf(f, "%s: %s\n", keep[i], v);
         free(v);
     }
@@ -343,12 +343,12 @@ static int busdeliver(const char *path, const char *to, const char *intent, cons
     if (intent)
         fprintf(f, "Hai-Intent: %s\n", intent);
     fputc('\n', f);
-    body = mimeplain(buf, n);
-    unquote(body);
+    body = mime_plain_text(buf, n);
+    strip_quoted_reply(body);
     fputs(body, f);
     fputc('\n', f);
     free(body);
-    if (fclose(f) != 0 || mddeliver(dir, tmp, err, errlen) < 0) {
+    if (fclose(f) != 0 || maildir_deliver(dir, tmp, err, errlen) < 0) {
         unlink(tmp);
         goto fail;
     }
@@ -362,22 +362,22 @@ fail:
 }
 
 /* the crossing the file answers, by its own headers */
-static Crossing *answersof(Crossing *log, const char *path) {
+static Crossing *answered_crossing_of_file(Crossing *log, const char *path) {
     Crossing *c;
     Hdr *h = NULL;
     size_t n;
-    char *buf = slurp(path, &n);
+    char *buf = read_file(path, &n);
 
     if (!buf)
         return NULL;
-    mimehdrs(buf, n, &h);
-    c = answers(log, h);
+    mime_parse_headers(buf, n, &h);
+    c = answered_crossing(log, h);
     arrfree(h);
     free(buf);
     return c;
 }
 
-void gwinbound(sqlite3 *db) {
+void gateway_inbound(sqlite3 *db) {
     struct {
         sqlite3_int64 key;
         int value;
@@ -390,19 +390,19 @@ void gwinbound(sqlite3 *db) {
 
     if (!gateway[0])
         return;
-    log = logread();
+    log = crossing_log_read();
     for (i = 0; i < nroutes; i++) { /* fresh mail from outside */
         Query q;
-        if (querycompile(routes[i].query, &q, &err) < 0) {
+        if (query_compile(routes[i].query, &q, &err) < 0) {
             fprintf(stderr, "hml new: route %d: %s\n", i, err);
             free(err);
             err = NULL;
             continue;
         }
-        st = queryprep(db,
-                       "SELECT id FROM msg WHERE id IN (SELECT id FROM "
-                       "newmsg) AND (%s)",
-                       &q, "", &err);
+        st = query_prepare(db,
+                           "SELECT id FROM msg WHERE id IN (SELECT id FROM "
+                           "newmsg) AND (%s)",
+                           &q, "", &err);
         if (!st) {
             fprintf(stderr, "hml new: route %d: %s\n", i, err);
             free(err);
@@ -415,7 +415,7 @@ void gwinbound(sqlite3 *db) {
             }
             sqlite3_finalize(st);
         }
-        queryfree(&q);
+        query_free(&q);
     }
     if (sqlite3_prepare_v2(db,
                            "SELECT m.id, m.mid, f.box, f.sub, f.name FROM msg "
@@ -424,7 +424,7 @@ void gwinbound(sqlite3 *db) {
                            -1, &st, NULL) != SQLITE_OK ||
         sqlite3_prepare_v2(db, "SELECT mid FROM ref WHERE msg = ?", -1, &refs, NULL) != SQLITE_OK) {
         fprintf(stderr, "hml new: gateway: %s\n", sqlite3_errmsg(db));
-        logfree(log);
+        crossing_log_free(log);
         hmfree(hits);
         return;
     }
@@ -451,10 +451,10 @@ void gwinbound(sqlite3 *db) {
         sqlite3_reset(refs);
         if (!c && (k = hmgeti(hits, id)) < 0)
             continue;
-        if (!filepath(box, sub, name, path, sizeof path))
+        if (!file_path(box, sub, name, path, sizeof path))
             continue;
         if (c) { /* a reply: to whoever it answers, precisely */
-            Crossing *p = answersof(log, path);
+            Crossing *p = answered_crossing_of_file(log, path);
             if (p)
                 c = p;
             to = c->local;
@@ -463,13 +463,13 @@ void gwinbound(sqlite3 *db) {
                 intent = "answer";
         } else
             to = routes[hits[k].value].local;
-        if (busdeliver(path, to, intent, expect, from, sizeof from, e, sizeof e) < 0) {
+        if (bus_deliver(path, to, intent, expect, from, sizeof from, e, sizeof e) < 0) {
             fprintf(stderr, "hml new: gateway: %s: %s\n", mid, e);
             continue;
         }
         slash = strchr(box, '/');
         snprintf(acct, sizeof acct, "%.*s", (int)(slash ? slash - box : 0), box);
-        if (gwlogadd(mid, to, from, acct, intent ? intent : "") < 0)
+        if (gateway_log_add(mid, to, from, acct, intent ? intent : "") < 0)
             fprintf(stderr, "hml new: gateway: cannot log %s\n", mid);
         printf("hml new: gateway: %s -> %s%s\n", from, to, intent ? " (answer)" : "");
         /* a later message of this run may answer this one */
@@ -484,18 +484,18 @@ void gwinbound(sqlite3 *db) {
         fprintf(stderr, "hml new: gateway: %s\n", sqlite3_errmsg(db));
     sqlite3_finalize(st);
     sqlite3_finalize(refs);
-    logfree(log);
+    crossing_log_free(log);
     hmfree(hits);
 }
 
 /* --- outbound: the bus answering the outside ---------------------------- */
 
-static void sadd(char **b, const char *s, size_t n) {
+static void append_bytes(char **b, const char *s, size_t n) {
     if (n)
         memcpy(arraddnptr(*b, n), s, n);
 }
 
-int gwoutbound(const char *msg, size_t n, char *err, size_t errlen) {
+int gateway_outbound(const char *msg, size_t n, char *err, size_t errlen) {
     const Account *a = NULL;
     Crossing *log, *c;
     Hdr *h = NULL;
@@ -505,11 +505,11 @@ int gwoutbound(const char *msg, size_t n, char *err, size_t errlen) {
 
     if (!gateway[0])
         return 0;
-    bo = mimehdrs(msg, n, &h);
-    log = logread();
-    if (!(c = answers(log, h))) {
+    bo = mime_parse_headers(msg, n, &h);
+    log = crossing_log_read();
+    if (!(c = answered_crossing(log, h))) {
         arrfree(h);
-        logfree(log);
+        crossing_log_free(log);
         return 0;
     }
     for (k = 0; k < naccounts; k++)
@@ -518,42 +518,42 @@ int gwoutbound(const char *msg, size_t n, char *err, size_t errlen) {
     if (!a) {
         snprintf(err, errlen, "account %s is gone", c->account);
         arrfree(h);
-        logfree(log);
+        crossing_log_free(log);
         return -1;
     }
-    v = mimehget(h, "From");
-    mimeaddr(v ? v : "", local, sizeof local);
+    v = mime_header_get(h, "From");
+    mime_bare_address(v ? v : "", local, sizeof local);
     free(v);
-    v = mimehget(h, "Message-ID");
-    mid = gwid(v ? v : "");
+    v = mime_header_get(h, "Message-ID");
+    mid = gateway_message_id(v ? v : "");
     free(v);
-    if (!(intent = mimehget(h, "Hai-Intent")))
+    if (!(intent = mime_header_get(h, "Hai-Intent")))
         intent = strdup("");
     /* the same message: From the account in the bus address's name, To
      * the outside party, the bus's own headers left behind */
-    sadd(&wire, "From: \"", 7);
-    sadd(&wire, local, strlen(local));
-    sadd(&wire, "\" <", 3);
-    sadd(&wire, a->user, strlen(a->user));
-    sadd(&wire, ">\nTo: ", 6);
-    sadd(&wire, c->remote, strlen(c->remote));
-    sadd(&wire, "\n", 1);
+    append_bytes(&wire, "From: \"", 7);
+    append_bytes(&wire, local, strlen(local));
+    append_bytes(&wire, "\" <", 3);
+    append_bytes(&wire, a->user, strlen(a->user));
+    append_bytes(&wire, ">\nTo: ", 6);
+    append_bytes(&wire, c->remote, strlen(c->remote));
+    append_bytes(&wire, "\n", 1);
     for (i = 0; i < arrlenu(h); i++) {
         const char *nm = h[i].name;
         size_t nl = h[i].nlen;
         if ((nl == 4 && !strncasecmp(nm, "From", 4)) || (nl == 2 && !strncasecmp(nm, "To", 2)) || (nl == 2 && !strncasecmp(nm, "Cc", 2)) ||
             (nl == 3 && !strncasecmp(nm, "Bcc", 3)) || (nl >= 4 && !strncasecmp(nm, "Hai-", 4)))
             continue;
-        sadd(&wire, nm, nl);
-        sadd(&wire, ":", 1);
-        sadd(&wire, h[i].val, h[i].vlen);
-        sadd(&wire, "\n", 1);
+        append_bytes(&wire, nm, nl);
+        append_bytes(&wire, ":", 1);
+        append_bytes(&wire, h[i].val, h[i].vlen);
+        append_bytes(&wire, "\n", 1);
     }
-    sadd(&wire, "\n", 1);
-    sadd(&wire, msg + bo, n - bo);
+    append_bytes(&wire, "\n", 1);
+    append_bytes(&wire, msg + bo, n - bo);
     arrput(rcpts, strdup(c->remote));
-    rc = smtpsubmit(a, a->user, rcpts, wire, arrlenu(wire), err, errlen);
-    if (rc == 0 && gwlogadd(mid, local, c->remote, a->name, intent) < 0)
+    rc = smtp_submit(a, a->user, rcpts, wire, arrlenu(wire), err, errlen);
+    if (rc == 0 && gateway_log_add(mid, local, c->remote, a->name, intent) < 0)
         fprintf(stderr, "hml send: gateway: cannot log %s\n", mid);
     free(rcpts[0]);
     arrfree(rcpts);
@@ -561,6 +561,6 @@ int gwoutbound(const char *msg, size_t n, char *err, size_t errlen) {
     free(mid);
     free(intent);
     arrfree(h);
-    logfree(log);
+    crossing_log_free(log);
     return rc == 0 ? 1 : -1;
 }

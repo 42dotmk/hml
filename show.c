@@ -6,7 +6,7 @@
  * Parts are numbered pre-order from 1 like notmuch, so a part id found in
  * the text output addresses the same part in --format=raw --part=N. A
  * body line that starts with a form feed goes out with it doubled, so
- * a mail quoting this output cannot pass for framing (see putbody). */
+ * a mail quoting this output cannot pass for framing (see print_body). */
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,7 +34,7 @@ typedef struct {
  * tool results are full of it — and the reader must not read that
  * framing as this stream's: no marker of ours ever starts with two.
  * The closing marker gets its own line. */
-static void putbody(const char *s, size_t n) {
+static void print_body(const char *s, size_t n) {
     size_t a = 0;
 
     if (!n) {
@@ -54,7 +54,7 @@ static void putbody(const char *s, size_t n) {
     }
 }
 
-static void sadd(char **b, const char *t) {
+static void append_string(char **b, const char *t) {
     size_t n = strlen(t);
 
     if (n)
@@ -70,17 +70,17 @@ static int fail(const char *cmd, char *err) {
 /* --- the matching messages ---------------------------------------------- */
 
 /* messages matching c with the path of one of their files, by date */
-static Hit *hits(sqlite3 *db, const Query *c, int newest, char **err) {
+static Hit *find_hits(sqlite3 *db, const Query *c, int newest, char **err) {
     sqlite3_stmt *st;
     Hit *out = NULL;
     char path[4608];
     int rc;
 
-    if (!(st = queryprep(db,
-                         "SELECT msg.id,msg.mid,msg.date,file.box,file.sub,"
-                         "file.name FROM msg JOIN file ON file.msg=msg.id"
-                         " WHERE (%s)",
-                         c, newest ? " ORDER BY msg.date DESC,msg.id DESC" : " ORDER BY msg.date,msg.id", err)))
+    if (!(st = query_prepare(db,
+                             "SELECT msg.id,msg.mid,msg.date,file.box,file.sub,"
+                             "file.name FROM msg JOIN file ON file.msg=msg.id"
+                             " WHERE (%s)",
+                             c, newest ? " ORDER BY msg.date DESC,msg.id DESC" : " ORDER BY msg.date,msg.id", err)))
         return NULL;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         sqlite3_int64 id = sqlite3_column_int64(st, 0);
@@ -88,7 +88,7 @@ static Hit *hits(sqlite3 *db, const Query *c, int newest, char **err) {
         Hit h;
         if (arrlen(out) && arrlast(out).id == id)
             continue; /* another file of the same message */
-        if (!filepath(box, (const char *)sqlite3_column_text(st, 4), (const char *)sqlite3_column_text(st, 5), path, sizeof path))
+        if (!file_path(box, (const char *)sqlite3_column_text(st, 4), (const char *)sqlite3_column_text(st, 5), path, sizeof path))
             continue;
         h.id = id;
         h.mid = strdup((const char *)sqlite3_column_text(st, 1));
@@ -105,7 +105,7 @@ static Hit *hits(sqlite3 *db, const Query *c, int newest, char **err) {
     return out;
 }
 
-static void hitsfree(Hit *h) {
+static void free_hits(Hit *h) {
     ptrdiff_t i;
 
     for (i = 0; i < arrlen(h); i++) {
@@ -116,7 +116,7 @@ static void hitsfree(Hit *h) {
     arrfree(h);
 }
 
-static int readfile(const char *path, char **buf, size_t *n) {
+static int read_file(const char *path, char **buf, size_t *n) {
     FILE *f = fopen(path, "rb");
     char *b = NULL;
     size_t k;
@@ -153,10 +153,10 @@ typedef struct {
     char *htmltext;
 } Walk;
 
-static void walk(Walk *w, const char *s, size_t n);
+static void walk_entity(Walk *w, const char *s, size_t n);
 
 /* the entities between --boundary lines, each walked on its own */
-static void multipart(Walk *w, const char *s, size_t n, const char *b) {
+static void walk_multipart(Walk *w, const char *s, size_t n, const char *b) {
     size_t bl = strlen(b), pos = 0, start = 0, end;
     const char *nl;
     int in = 0;
@@ -166,7 +166,7 @@ static void multipart(Walk *w, const char *s, size_t n, const char *b) {
         end = nl ? (size_t)(nl - s) + 1 : n;
         if (end - pos >= bl + 2 && s[pos] == '-' && s[pos + 1] == '-' && !memcmp(s + pos + 2, b, bl)) {
             if (in)
-                walk(w, s + start, pos > start ? pos - start : 0);
+                walk_entity(w, s + start, pos > start ? pos - start : 0);
             if (end - pos >= bl + 4 && s[pos + bl + 2] == '-' && s[pos + bl + 3] == '-')
                 return;
             in = 1;
@@ -175,29 +175,29 @@ static void multipart(Walk *w, const char *s, size_t n, const char *b) {
         pos = end;
     }
     if (in)
-        walk(w, s + start, n - start);
+        walk_entity(w, s + start, n - start);
 }
 
 /* the header block notmuch prints for a message (also inside a
  * message/rfc822 part) */
-static void showheaders(Hdr *h, long date, const char *tags) {
+static void print_headers(Hdr *h, long date, const char *tags) {
     static const char *names[] = {"Subject", "From", "To", "Cc", "Date"};
-    char *from = mimehget(h, "From"), *d, name[128], rel[32];
+    char *from = mime_header_get(h, "From"), *d, name[128], rel[32];
     size_t i;
 
     puts("\fheader{");
-    d = mimedecode(from ? from : "");
-    dispname(d, name, sizeof name);
-    reldate(date, rel, sizeof rel);
+    d = mime_decode_header(from ? from : "");
+    display_name(d, name, sizeof name);
+    relative_date(date, rel, sizeof rel);
     printf("%s (%s) (%s)\n", name, rel, tags ? tags : "");
     free(d);
     free(from);
     for (i = 0; i < sizeof names / sizeof *names; i++) {
-        char *v = mimehget(h, names[i]);
+        char *v = mime_header_get(h, names[i]);
         if (!v)
             continue;
         if (*v || i != 3) { /* Cc only when present */
-            d = i == 4 ? strdup(v) : mimedecode(v);
+            d = i == 4 ? strdup(v) : mime_decode_header(v);
             printf("%s: %s\n", names[i], d);
             free(d);
         }
@@ -207,10 +207,10 @@ static void showheaders(Hdr *h, long date, const char *tags) {
 }
 
 /* decoded text of a text part body, UTF-8 */
-static char *textof(const char *ct, const char *cte, const char *s, size_t n) {
-    char *dec = mimecte(cte, s, n), *cs = ct ? mimeparam(ct, "charset") : NULL, *u = NULL;
+static char *decode_text_part(const char *ct, const char *cte, const char *s, size_t n) {
+    char *dec = mime_decode_transfer_encoding(cte, s, n), *cs = ct ? mime_parameter(ct, "charset") : NULL, *u = NULL;
 
-    mimeutf8(&u, cs, dec, arrlenu(dec));
+    mime_convert_to_utf8(&u, cs, dec, arrlenu(dec));
     arrfree(dec);
     free(cs);
     return u;
@@ -218,26 +218,26 @@ static char *textof(const char *ct, const char *cte, const char *s, size_t n) {
 
 /* one entity: header block, then per its type; ids are assigned in the
  * order notmuch does (this part, then its children) */
-static void walk(Walk *w, const char *s, size_t n) {
+static void walk_entity(Walk *w, const char *s, size_t n) {
     Hdr *h = NULL;
-    size_t bo = mimehdrs(s, n, &h);
-    char *ct = mimehget(h, "Content-Type"), *cte = mimehget(h, "Content-Transfer-Encoding"), *cd = mimehget(h, "Content-Disposition"), *fn = NULL, *b, *u, *cid,
-         type[128] = "text/plain";
+    size_t bo = mime_parse_headers(s, n, &h);
+    char *ct = mime_header_get(h, "Content-Type"), *cte = mime_header_get(h, "Content-Transfer-Encoding"), *cd = mime_header_get(h, "Content-Disposition"),
+         *fn = NULL, *b, *u, *cid, type[128] = "text/plain";
     int id = w->next++, ismulti, isrfc, istext, isatt;
 
     if (ct)
-        mimetype(ct, type, sizeof type);
+        mime_media_type(ct, type, sizeof type);
     if (cd)
-        fn = mimeparam(cd, "filename");
+        fn = mime_parameter(cd, "filename");
     if (!fn && ct)
-        fn = mimeparam(ct, "name");
+        fn = mime_parameter(ct, "name");
     ismulti = !strncmp(type, "multipart/", 10);
     isrfc = !strcmp(type, "message/rfc822");
     istext = !strncmp(type, "text/", 5);
     /* an attachment is what says so, or a named non-text leaf that is not
      * a Content-ID image the HTML references (the same rule the index
      * uses for the attachment tag) */
-    cid = mimehget(h, "Content-ID");
+    cid = mime_header_get(h, "Content-ID");
     isatt = !(!strcmp(type, "application/pkcs7-signature") || !strcmp(type, "application/x-pkcs7-signature") || !strcmp(type, "application/pgp-signature")) &&
             ((cd && !strncasecmp(cd, "attachment", 10)) || (fn && !cid && !ismulti && !isrfc && !istext));
     free(cid);
@@ -248,71 +248,71 @@ static void walk(Walk *w, const char *s, size_t n) {
             if (ismulti || isrfc)
                 fwrite(s + bo, 1, n - bo, stdout);
             else {
-                char *dec = mimecte(cte, s + bo, n - bo);
+                char *dec = mime_decode_transfer_encoding(cte, s + bo, n - bo);
                 fwrite(dec, 1, arrlenu(dec), stdout);
                 arrfree(dec);
             }
-        } else if (ismulti && w->depth < DepthMax && ct && (b = mimeparam(ct, "boundary"))) {
+        } else if (ismulti && w->depth < DepthMax && ct && (b = mime_parameter(ct, "boundary"))) {
             w->depth++;
-            multipart(w, s + bo, n - bo, b);
+            walk_multipart(w, s + bo, n - bo, b);
             w->depth--;
             free(b);
         } else if (isrfc && w->depth < DepthMax) {
-            char *dec = mimecte(cte, s + bo, n - bo);
+            char *dec = mime_decode_transfer_encoding(cte, s + bo, n - bo);
             w->depth++;
-            walk(w, dec, arrlenu(dec));
+            walk_entity(w, dec, arrlenu(dec));
             w->depth--;
             arrfree(dec);
         }
     } else if (w->mode == WText) {
-        if (ismulti && w->depth < DepthMax && ct && (b = mimeparam(ct, "boundary"))) {
+        if (ismulti && w->depth < DepthMax && ct && (b = mime_parameter(ct, "boundary"))) {
             w->depth++;
-            multipart(w, s + bo, n - bo, b);
+            walk_multipart(w, s + bo, n - bo, b);
             w->depth--;
             free(b);
         } else if (isrfc && w->depth < DepthMax) {
-            char *dec = mimecte(cte, s + bo, n - bo);
+            char *dec = mime_decode_transfer_encoding(cte, s + bo, n - bo);
             w->depth++;
-            walk(w, dec, arrlenu(dec));
+            walk_entity(w, dec, arrlenu(dec));
             w->depth--;
             arrfree(dec);
         } else if (istext && !isatt) {
-            u = textof(ct, cte, s + bo, n - bo);
+            u = decode_text_part(ct, cte, s + bo, n - bo);
             if (!strcmp(type, "text/html"))
-                mimehtmltext(&w->htmltext, u, arrlenu(u));
+                mime_html_to_text(&w->htmltext, u, arrlenu(u));
             else
                 memcpy(arraddnptr(w->plain, arrlenu(u)), u, arrlenu(u));
             arrfree(u);
         }
     } else if (isatt) {
-        char *dn = mimedecode(fn ? fn : "");
+        char *dn = mime_decode_header(fn ? fn : "");
         printf("\fattachment{ ID: %d, Filename: %s, Content-type: %s\n", id, dn, type);
         printf("Non-text part: %s\n", type);
         puts("\fattachment}");
         free(dn);
     } else if (ismulti) {
         printf("\fpart{ ID: %d, Content-type: %s\n", id, type);
-        if (w->depth < DepthMax && ct && (b = mimeparam(ct, "boundary"))) {
+        if (w->depth < DepthMax && ct && (b = mime_parameter(ct, "boundary"))) {
             w->depth++;
-            multipart(w, s + bo, n - bo, b);
+            walk_multipart(w, s + bo, n - bo, b);
             w->depth--;
             free(b);
         }
         puts("\fpart}");
     } else if (isrfc) {
-        char *dec = mimecte(cte, s + bo, n - bo);
+        char *dec = mime_decode_transfer_encoding(cte, s + bo, n - bo);
         Hdr *ih = NULL;
         char *dt;
         printf("\fpart{ ID: %d, Content-type: %s\n", id, type);
         if (w->depth < DepthMax) {
-            mimehdrs(dec, arrlenu(dec), &ih);
-            dt = mimehget(ih, "Date");
-            showheaders(ih, dt ? mimedate(dt) : 0, NULL);
+            mime_parse_headers(dec, arrlenu(dec), &ih);
+            dt = mime_header_get(ih, "Date");
+            print_headers(ih, dt ? mime_parse_date(dt) : 0, NULL);
             free(dt);
             arrfree(ih);
             puts("\fbody{");
             w->depth++;
-            walk(w, dec, arrlenu(dec));
+            walk_entity(w, dec, arrlenu(dec));
             w->depth--;
             puts("\fbody}");
         }
@@ -321,8 +321,8 @@ static void walk(Walk *w, const char *s, size_t n) {
     } else if (istext) {
         printf("\fpart{ ID: %d, Content-type: %s\n", id, type);
         if (strcmp(type, "text/html") || w->html) {
-            u = textof(ct, cte, s + bo, n - bo);
-            putbody(u, arrlenu(u));
+            u = decode_text_part(ct, cte, s + bo, n - bo);
+            print_body(u, arrlenu(u));
             arrfree(u);
         }
         puts("\fpart}");
@@ -338,7 +338,7 @@ static void walk(Walk *w, const char *s, size_t n) {
     arrfree(h);
 }
 
-static char *msgtags(sqlite3 *db, sqlite3_int64 id) {
+static char *message_tags(sqlite3 *db, sqlite3_int64 id) {
     sqlite3_stmt *st;
     char *out = NULL;
 
@@ -346,8 +346,8 @@ static char *msgtags(sqlite3 *db, sqlite3_int64 id) {
     sqlite3_bind_int64(st, 1, id);
     while (sqlite3_step(st) == SQLITE_ROW) {
         if (out)
-            sadd(&out, " ");
-        sadd(&out, (const char *)sqlite3_column_text(st, 0));
+            append_string(&out, " ");
+        append_string(&out, (const char *)sqlite3_column_text(st, 0));
     }
     sqlite3_finalize(st);
     arrput(out, '\0');
@@ -357,7 +357,7 @@ static char *msgtags(sqlite3 *db, sqlite3_int64 id) {
 /* one message as an mbox entry: a "From " separator line, the message,
  * body lines that would read as separators escaped mboxrd-style (">From "),
  * a blank line after — what `git am` and every mbox reader expect */
-static void mboxout(const char *buf, size_t n, long date) {
+static void print_mbox(const char *buf, size_t n, long date) {
     time_t t = date;
     char stamp[64];
     size_t a = 0, b;
@@ -390,7 +390,7 @@ typedef struct {
     int part, html, entire;
 } SOpts;
 
-static char *sopts(int argc, char **argv, SOpts *o, const char *cmd) {
+static char *parse_show_options(int argc, char **argv, SOpts *o, const char *cmd) {
     char *q = NULL;
     int i;
 
@@ -399,8 +399,8 @@ static char *sopts(int argc, char **argv, SOpts *o, const char *cmd) {
         if (!strcmp(a, "--")) {
             for (i++; i < argc; i++) {
                 if (q)
-                    sadd(&q, " ");
-                sadd(&q, argv[i]);
+                    append_string(&q, " ");
+                append_string(&q, argv[i]);
             }
             break;
         }
@@ -419,15 +419,15 @@ static char *sopts(int argc, char **argv, SOpts *o, const char *cmd) {
             return NULL;
         } else {
             if (q)
-                sadd(&q, " ");
-            sadd(&q, a);
+                append_string(&q, " ");
+            append_string(&q, a);
         }
     }
     arrput(q, '\0');
     return q;
 }
 
-int showmain(int argc, char **argv) {
+int show_main(int argc, char **argv) {
     SOpts o = {"text", "sender", 0, 0, 0};
     Query c;
     sqlite3 *db;
@@ -437,7 +437,7 @@ int showmain(int argc, char **argv) {
     ptrdiff_t i;
     int raw, mbox;
 
-    if (!(q = sopts(argc, argv, &o, "show")))
+    if (!(q = parse_show_options(argc, argv, &o, "show")))
         return 2;
     if (!*q) {
         fputs("usage: hml show [--format=text|raw|mbox] [--part=N] "
@@ -452,67 +452,67 @@ int showmain(int argc, char **argv) {
         arrfree(q);
         return fail("show", strdup("--format must be text, raw or mbox"));
     }
-    if (querycompile(q, &c, &err) < 0) {
+    if (query_compile(q, &c, &err) < 0) {
         arrfree(q);
         return fail("show", err);
     }
     arrfree(q);
-    if (!(db = dbopen(dberr, sizeof dberr))) {
-        queryfree(&c);
+    if (!(db = db_open(dberr, sizeof dberr))) {
+        query_free(&c);
         return fail("show", strdup(dberr));
     }
     if (o.entire) { /* every message of every thread that has a hit */
         Query t = {NULL, NULL, NULL};
-        sadd(&t.sql, "msg.thread IN (SELECT thread FROM msg WHERE (");
-        sadd(&t.sql, c.sql);
-        sadd(&t.sql, "))");
+        append_string(&t.sql, "msg.thread IN (SELECT thread FROM msg WHERE (");
+        append_string(&t.sql, c.sql);
+        append_string(&t.sql, "))");
         arrput(t.sql, '\0');
         t.params = c.params;
-        hs = hits(db, &t, 0, &err);
+        hs = find_hits(db, &t, 0, &err);
         arrfree(t.sql);
     } else
-        hs = hits(db, &c, 0, &err);
-    queryfree(&c);
+        hs = find_hits(db, &c, 0, &err);
+    query_free(&c);
     if (err) {
         sqlite3_close(db);
         return fail("show", err);
     }
     if (!arrlen(hs)) {
         sqlite3_close(db);
-        hitsfree(hs);
+        free_hits(hs);
         return fail("show", strdup("no messages match"));
     }
     for (i = 0; i < (raw ? 1 : arrlen(hs)); i++) {
         Walk w = {WShow, o.html, o.part, 0, 1, 0, NULL, NULL};
-        if (readfile(hs[i].path, &buf, &n) < 0) {
+        if (read_file(hs[i].path, &buf, &n) < 0) {
             if (raw) {
                 sqlite3_close(db);
-                hitsfree(hs);
+                free_hits(hs);
                 return fail("show", strdup("cannot read message file"));
             }
             continue; /* vanished since the index was written */
         }
         if (mbox) {
-            mboxout(buf, n, hs[i].date);
+            print_mbox(buf, n, hs[i].date);
         } else if (raw && !o.part) {
             fwrite(buf, 1, n, stdout);
         } else if (raw) {
             w.mode = WRaw;
-            walk(&w, buf, n);
+            walk_entity(&w, buf, n);
             if (!w.found) {
                 arrfree(buf);
                 sqlite3_close(db);
-                hitsfree(hs);
+                free_hits(hs);
                 return fail("show", strdup("no such part"));
             }
         } else {
             Hdr *h = NULL;
-            char *tags = msgtags(db, hs[i].id);
-            mimehdrs(buf, n, &h);
+            char *tags = message_tags(db, hs[i].id);
+            mime_parse_headers(buf, n, &h);
             printf("\fmessage{ id:%s depth:0 match:1 excluded:0 filename:%s\n", hs[i].mid, hs[i].path);
-            showheaders(h, hs[i].date, tags);
+            print_headers(h, hs[i].date, tags);
             puts("\fbody{");
-            walk(&w, buf, n);
+            walk_entity(&w, buf, n);
             puts("\fbody}");
             puts("\fmessage}");
             arrfree(h);
@@ -521,39 +521,39 @@ int showmain(int argc, char **argv) {
         arrfree(buf);
     }
     sqlite3_close(db);
-    hitsfree(hs);
+    free_hits(hs);
     return 0;
 }
 
 /* --- hml reply ----------------------------------------------------------- */
 
-static int sameaddr(const char *a, const char *b) {
+static int same_address(const char *a, const char *b) {
     char x[256], y[256];
 
-    mimeaddr(a, x, sizeof x);
-    mimeaddr(b, y, sizeof y);
+    mime_bare_address(a, x, sizeof x);
+    mime_bare_address(b, y, sizeof y);
     return !strcmp(x, y);
 }
 
-static int isown(const char *m) {
+static int is_own_address(const char *m) {
     int k;
 
     for (k = 0; k < naccounts; k++)
-        if (sameaddr(m, accounts[k].user))
+        if (same_address(m, accounts[k].user))
             return 1;
     return 0;
 }
 
-static int inlist(char **l, const char *m) {
+static int in_list(char **l, const char *m) {
     ptrdiff_t i;
 
     for (i = 0; i < arrlen(l); i++)
-        if (sameaddr(l[i], m))
+        if (same_address(l[i], m))
             return 1;
     return 0;
 }
 
-static void freelist(char **l) {
+static void free_list(char **l) {
     ptrdiff_t i;
 
     for (i = 0; i < arrlen(l); i++)
@@ -562,19 +562,19 @@ static void freelist(char **l) {
 }
 
 /* a decoded header split into mailboxes; empty when absent */
-static char **mailboxes(Hdr *h, const char *name) {
-    char *v = mimehget(h, name), *d, **l = NULL;
+static char **header_mailboxes(Hdr *h, const char *name) {
+    char *v = mime_header_get(h, name), *d, **l = NULL;
 
     if (!v)
         return NULL;
-    d = mimedecode(v);
-    mimeaddrs(d, &l);
+    d = mime_decode_header(v);
+    mime_split_addresses(d, &l);
     free(d);
     free(v);
     return l;
 }
 
-static void printlist(const char *name, char **l) {
+static void print_address_list(const char *name, char **l) {
     ptrdiff_t i;
 
     if (!arrlen(l))
@@ -585,7 +585,7 @@ static void printlist(const char *name, char **l) {
     putchar('\n');
 }
 
-int replymain(int argc, char **argv) {
+int reply_main(int argc, char **argv) {
     SOpts o = {"text", "sender", 0, 0, 0};
     Query c;
     sqlite3 *db;
@@ -598,7 +598,7 @@ int replymain(int argc, char **argv) {
     ptrdiff_t i;
     int all, k;
 
-    if (!(q = sopts(argc, argv, &o, "reply")))
+    if (!(q = parse_show_options(argc, argv, &o, "reply")))
         return 2;
     if (!*q) {
         fputs("usage: hml reply [--reply-to=sender|all] [--] <query>\n", stderr);
@@ -606,29 +606,29 @@ int replymain(int argc, char **argv) {
         return 2;
     }
     all = !strcmp(o.replyto, "all");
-    if (querycompile(q, &c, &err) < 0) {
+    if (query_compile(q, &c, &err) < 0) {
         arrfree(q);
         return fail("reply", err);
     }
     arrfree(q);
-    if (!(db = dbopen(dberr, sizeof dberr))) {
-        queryfree(&c);
+    if (!(db = db_open(dberr, sizeof dberr))) {
+        query_free(&c);
         return fail("reply", strdup(dberr));
     }
-    hs = hits(db, &c, 1, &err); /* newest first: reply to the latest */
-    queryfree(&c);
+    hs = find_hits(db, &c, 1, &err); /* newest first: reply to the latest */
+    query_free(&c);
     sqlite3_close(db);
     if (err)
         return fail("reply", err);
     if (!arrlen(hs)) {
-        hitsfree(hs);
+        free_hits(hs);
         return fail("reply", strdup("no messages match"));
     }
-    if (readfile(hs[0].path, &buf, &n) < 0) {
-        hitsfree(hs);
+    if (read_file(hs[0].path, &buf, &n) < 0) {
+        free_hits(hs);
         return fail("reply", strdup("cannot read message file"));
     }
-    mimehdrs(buf, n, &h);
+    mime_parse_headers(buf, n, &h);
 
     /* the account the message lives in is the one replying */
     for (k = 0; k < naccounts; k++)
@@ -639,13 +639,13 @@ int replymain(int argc, char **argv) {
 
     /* From: our address as the original addressed it (keeps the display
      * name the sender used for us), else bare */
-    orig = mailboxes(h, "To");
-    l = mailboxes(h, "Cc");
+    orig = header_mailboxes(h, "To");
+    l = header_mailboxes(h, "Cc");
     for (i = 0; i < arrlen(l); i++)
         arrput(orig, l[i]);
     arrfree(l);
     for (i = 0; i < arrlen(orig); i++)
-        if (acct && sameaddr(orig[i], acct)) {
+        if (acct && same_address(orig[i], acct)) {
             me = strdup(orig[i]);
             break;
         }
@@ -653,42 +653,42 @@ int replymain(int argc, char **argv) {
         me = strdup(acct ? acct : "");
 
     /* To: the sender (Reply-To wins); all: plus everyone else, minus us */
-    l = mailboxes(h, "Reply-To");
+    l = header_mailboxes(h, "Reply-To");
     if (!arrlen(l)) {
-        freelist(l);
-        l = mailboxes(h, "From");
+        free_list(l);
+        l = header_mailboxes(h, "From");
     }
     for (i = 0; i < arrlen(l); i++)
-        if (!inlist(to, l[i]))
+        if (!in_list(to, l[i]))
             arrput(to, strdup(l[i]));
-    freelist(l);
+    free_list(l);
     if (all) {
         for (i = 0; i < arrlen(orig); i++)
-            if (!isown(orig[i]) && !inlist(to, orig[i]) && !inlist(cc, orig[i]))
+            if (!is_own_address(orig[i]) && !in_list(to, orig[i]) && !in_list(cc, orig[i]))
                 arrput(cc, strdup(orig[i]));
     }
-    freelist(orig);
+    free_list(orig);
 
-    from = (v = mimehget(h, "From")) ? mimedecode(v) : strdup("");
+    from = (v = mime_header_get(h, "From")) ? mime_decode_header(v) : strdup("");
     free(v);
-    subject = (v = mimehget(h, "Subject")) ? mimedecode(v) : strdup("");
+    subject = (v = mime_header_get(h, "Subject")) ? mime_decode_header(v) : strdup("");
     free(v);
-    date = mimehget(h, "Date");
-    mid = mimehget(h, "Message-ID");
+    date = mime_header_get(h, "Date");
+    mid = mime_header_get(h, "Message-ID");
 
     printf("From: %s\n", me);
     p = subject;
     while (isspace((unsigned char)*p))
         p++;
     printf("Subject: %s%s\n", strncasecmp(p, "re:", 3) ? "Re: " : "", p);
-    printlist("To", to);
-    printlist("Cc", cc);
+    print_address_list("To", to);
+    print_address_list("Cc", cc);
     if (mid && *mid)
         printf("In-Reply-To: %s\n", mid);
-    v = mimehget(h, "References");
+    v = mime_header_get(h, "References");
     if (!v || !*v) {
         free(v);
-        v = mimehget(h, "In-Reply-To");
+        v = mime_header_get(h, "In-Reply-To");
     }
     if ((v && *v) || (mid && *mid))
         printf("References: %s%s%s\n", v && *v ? v : "", v && *v && mid && *mid ? " " : "", mid && *mid ? mid : "");
@@ -696,7 +696,7 @@ int replymain(int argc, char **argv) {
     putchar('\n');
 
     /* the quoted text: plain parts, else the html stripped to text */
-    walk(&w, buf, n);
+    walk_entity(&w, buf, n);
     text = arrlen(w.plain) ? w.plain : w.htmltext;
     printf("On %s, %s wrote:\n", date ? date : "", from);
     if (text) {
@@ -713,8 +713,8 @@ int replymain(int argc, char **argv) {
     }
     arrfree(w.plain);
     arrfree(w.htmltext);
-    freelist(to);
-    freelist(cc);
+    free_list(to);
+    free_list(cc);
     free(me);
     free(from);
     free(subject);
@@ -722,6 +722,6 @@ int replymain(int argc, char **argv) {
     free(mid);
     arrfree(h);
     arrfree(buf);
-    hitsfree(hs);
+    free_hits(hs);
     return 0;
 }

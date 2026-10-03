@@ -21,7 +21,7 @@ typedef struct { /* header block to strip (Bcc, including continuations) */
     size_t start, end;
 } Range;
 
-static void b64(const unsigned char *in, size_t n, char *out) {
+static void base64_encode(const unsigned char *in, size_t n, char *out) {
     static const char t[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     size_t i, o = 0;
 
@@ -45,7 +45,7 @@ static void b64(const unsigned char *in, size_t n, char *out) {
     out[o] = '\0';
 }
 
-static char *readall(FILE *f, size_t *lenp) {
+static char *read_all(FILE *f, size_t *lenp) {
     char *buf = NULL;
     size_t len = 0, cap = 0, n;
 
@@ -65,7 +65,7 @@ static char *readall(FILE *f, size_t *lenp) {
 }
 
 /* copy a header value, dropping line breaks (unfolding) */
-static char *hdrvalue(const char *msg, size_t vs, size_t be) {
+static char *header_value(const char *msg, size_t vs, size_t be) {
     char *v = malloc(be - vs + 1);
     size_t i, n = 0;
 
@@ -79,7 +79,7 @@ static char *hdrvalue(const char *msg, size_t vs, size_t be) {
 }
 
 /* pull one address out of a fragment: prefer <...>, else the bare token */
-static void addone(char ***out, const char *s, const char *e) {
+static void add_address(char ***out, const char *s, const char *e) {
     const char *lt = NULL, *gt = NULL, *p;
     char *a;
     size_t n;
@@ -109,7 +109,7 @@ static void addone(char ***out, const char *s, const char *e) {
 }
 
 /* split an address list on commas outside quoted strings */
-static void addrsplit(const char *v, char ***out) {
+static void split_addresses(const char *v, char ***out) {
     const char *start = v, *p = v;
     int q = 0;
 
@@ -117,7 +117,7 @@ static void addrsplit(const char *v, char ***out) {
         if (*p == '"')
             q = !q;
         if ((*p == ',' && !q) || *p == '\0') {
-            addone(out, start, p);
+            add_address(out, start, p);
             start = p + 1;
             if (!*p)
                 break;
@@ -125,9 +125,9 @@ static void addrsplit(const char *v, char ***out) {
     }
 }
 
-static int smtpreply(Imap *im, char *err, size_t errlen) {
+static int smtp_read_reply(Imap *im, char *err, size_t errlen) {
     for (;;) {
-        char *l = imapline(im, err, errlen);
+        char *l = imap_read_line(im, err, errlen);
         int code;
         if (!l)
             return -1;
@@ -141,7 +141,7 @@ static int smtpreply(Imap *im, char *err, size_t errlen) {
 }
 
 /* send one command line, expect a reply of the given class (2xx, 3xx) */
-static int smtpcmd(Imap *im, int class, char *err, size_t errlen, const char *fmt, ...) {
+static int smtp_command(Imap *im, int class, char *err, size_t errlen, const char *fmt, ...) {
     char cmd[1100];
     va_list ap;
     size_t n;
@@ -153,11 +153,11 @@ static int smtpcmd(Imap *im, int class, char *err, size_t errlen, const char *fm
     n = strlen(cmd);
     cmd[n] = '\r';
     cmd[n + 1] = '\n';
-    if (imapwrite(im, cmd, n + 2) < 0) {
+    if (imap_write(im, cmd, n + 2) < 0) {
         snprintf(err, errlen, "connection lost");
         return -1;
     }
-    code = smtpreply(im, err, errlen);
+    code = smtp_read_reply(im, err, errlen);
     if (code < 0)
         return -1;
     if (code / 100 != class) {
@@ -168,7 +168,7 @@ static int smtpcmd(Imap *im, int class, char *err, size_t errlen, const char *fm
     return 0;
 }
 
-static const Account *pickaccount(const char *name, const char *from) {
+static const Account *pick_account(const char *name, const char *from) {
     int i;
 
     for (i = 0; i < naccounts; i++)
@@ -180,14 +180,14 @@ static const Account *pickaccount(const char *name, const char *from) {
     return name ? NULL : &accounts[0];
 }
 
-static void wput(char **b, const char *s) {
+static void append_string(char **b, const char *s) {
     size_t n = strlen(s);
 
     if (n)
         memcpy(arraddnptr(*b, n), s, n);
 }
 
-static int rangecmp(const void *a, const void *b) {
+static int compare_ranges(const void *a, const void *b) {
     const Range *x = a, *y = b;
 
     return x->start < y->start ? -1 : x->start > y->start;
@@ -200,7 +200,7 @@ static int fail(const char *what, const char *why) {
 
 /* --- local delivery --- */
 
-static int islocal(const char *addr) {
+static int is_local_address(const char *addr) {
     const char *at = strrchr(addr, '@');
 
     return at && (!strcasecmp(at + 1, localdomain) || !strcasecmp(at + 1, "localhost"));
@@ -209,7 +209,7 @@ static int islocal(const char *addr) {
 /* the message, Bcc blocks skipped and CR stripped, into the maildir of
  * the local part; Date and Message-ID are added when missing, and a
  * bare body (no header block at all) gets To: and the blank line */
-static int deliverlocal(const char *msg, size_t msglen, const Range *bcc, const char *addr, int hasdate, const char *mid, int hashdrs) {
+static int deliver_local(const char *msg, size_t msglen, const Range *bcc, const char *addr, int hasdate, const char *mid, int hashdrs) {
     const char *at = strrchr(addr, '@');
     char err[256], root[4096], dir[4160], tmp[4160];
     size_t n = (size_t)(at - addr), o = 0;
@@ -219,11 +219,11 @@ static int deliverlocal(const char *msg, size_t msglen, const Range *bcc, const 
 
     if (n == 0 || n > 200 || addr[0] == '.' || memchr(addr, '/', n))
         return fail(addr, "bad local part");
-    expand(localbox, root, sizeof root);
+    expand_home(localbox, root, sizeof root);
     snprintf(dir, sizeof dir, "%s/%.*s", root, (int)n, addr);
-    if (mdensure(dir, err, sizeof err) < 0)
+    if (maildir_create(dir, err, sizeof err) < 0)
         return fail(dir, err);
-    mdtmp(tmp, sizeof tmp, dir);
+    maildir_temp_path(tmp, sizeof tmp, dir);
     if (!(f = fopen(tmp, "w")))
         return fail(tmp, "cannot create");
     if (!hasdate) {
@@ -252,25 +252,25 @@ static int deliverlocal(const char *msg, size_t msglen, const Range *bcc, const 
         fputc('\n', f);
         o = nl ? le + 1 : msglen;
     }
-    if (fclose(f) != 0 || mddeliver(dir, tmp, err, sizeof err) < 0) {
+    if (fclose(f) != 0 || maildir_deliver(dir, tmp, err, sizeof err) < 0) {
         unlink(tmp);
         return fail(dir, err[0] ? err : "write failed");
     }
     return 0;
 }
 
-int smtpsubmit(const Account *a, const char *envfrom, char **rcpts, const char *msg, size_t msglen, char *err, size_t errlen) {
+int smtp_submit(const Account *a, const char *envfrom, char **rcpts, const char *msg, size_t msglen, char *err, size_t errlen) {
     char e[256] = "", host[64], auth[600], authb64[820], *pass;
     Imap *im;
     size_t o;
     long i;
     int rc = -1;
 
-    if (!(pass = runpasscmd(a->passcmd, e, sizeof e))) {
+    if (!(pass = run_password_command(a->passcmd, e, sizeof e))) {
         snprintf(err, errlen, "password: %s", e);
         return -1;
     }
-    if (!(im = tlsconnect(a->smtphost, a->smtpport, e, sizeof e))) {
+    if (!(im = tls_connect(a->smtphost, a->smtpport, e, sizeof e))) {
         memset(pass, 0, strlen(pass));
         free(pass);
         snprintf(err, errlen, "%s: %s", a->smtphost, e);
@@ -289,32 +289,32 @@ int smtpsubmit(const Account *a, const char *envfrom, char **rcpts, const char *
         auth[n++] = '\0';
         memcpy(auth + n, pass, pl);
         n += pl;
-        b64((unsigned char *)auth, n, authb64);
+        base64_encode((unsigned char *)auth, n, authb64);
         memset(auth, 0, sizeof auth);
         memset(pass, 0, pl);
         free(pass);
     }
 
-    if (smtpreply(im, e, sizeof e) / 100 != 2) {
+    if (smtp_read_reply(im, e, sizeof e) / 100 != 2) {
         snprintf(err, errlen, "greeting: %s", e);
         goto close;
     }
-    if (smtpcmd(im, 2, e, sizeof e, "EHLO %s", host) < 0 || smtpcmd(im, 2, e, sizeof e, "AUTH PLAIN %s", authb64) < 0) {
+    if (smtp_command(im, 2, e, sizeof e, "EHLO %s", host) < 0 || smtp_command(im, 2, e, sizeof e, "AUTH PLAIN %s", authb64) < 0) {
         snprintf(err, errlen, "auth: %s", e);
         goto close;
     }
     memset(authb64, 0, sizeof authb64);
-    if (smtpcmd(im, 2, e, sizeof e, "MAIL FROM:<%s>", envfrom) < 0) {
+    if (smtp_command(im, 2, e, sizeof e, "MAIL FROM:<%s>", envfrom) < 0) {
         snprintf(err, errlen, "%s: %s", envfrom, e);
         goto close;
     }
     for (i = 0; i < arrlen(rcpts); i++) {
-        if (smtpcmd(im, 2, e, sizeof e, "RCPT TO:<%s>", rcpts[i]) < 0) {
+        if (smtp_command(im, 2, e, sizeof e, "RCPT TO:<%s>", rcpts[i]) < 0) {
             snprintf(err, errlen, "%s: %s", rcpts[i], e);
             goto close;
         }
     }
-    if (smtpcmd(im, 3, e, sizeof e, "DATA") < 0) {
+    if (smtp_command(im, 3, e, sizeof e, "DATA") < 0) {
         snprintf(err, errlen, "DATA: %s", e);
         goto close;
     }
@@ -325,24 +325,24 @@ int smtpsubmit(const Account *a, const char *envfrom, char **rcpts, const char *
         size_t le = nl ? (size_t)(nl - msg) : msglen, l = le - o;
         if (l && msg[le - 1] == '\r')
             l--;
-        if ((l && msg[o] == '.' && imapwrite(im, ".", 1) < 0) || imapwrite(im, msg + o, l) < 0 || imapwrite(im, "\r\n", 2) < 0) {
+        if ((l && msg[o] == '.' && imap_write(im, ".", 1) < 0) || imap_write(im, msg + o, l) < 0 || imap_write(im, "\r\n", 2) < 0) {
             snprintf(err, errlen, "write: connection lost");
             goto close;
         }
         o = nl ? le + 1 : msglen;
     }
-    if (imapwrite(im, ".\r\n", 3) < 0 || smtpreply(im, e, sizeof e) / 100 != 2) {
+    if (imap_write(im, ".\r\n", 3) < 0 || smtp_read_reply(im, e, sizeof e) / 100 != 2) {
         snprintf(err, errlen, "delivery: %s", e[0] ? e : "rejected");
         goto close;
     }
-    smtpcmd(im, 2, e, sizeof e, "QUIT");
+    smtp_command(im, 2, e, sizeof e, "QUIT");
     rc = 0;
 close:
-    imapclose(im);
+    imap_close(im);
     return rc;
 }
 
-int sendmain(int argc, char **argv) {
+int send_main(int argc, char **argv) {
     char err[256] = "", mid[128], *msg, *wire = NULL, *from = NULL;
     char *midhdr = NULL, *intent = NULL, *buslocal = NULL, *id;
     const char *acctname = NULL, *envfrom = NULL;
@@ -372,7 +372,7 @@ int sendmain(int argc, char **argv) {
         }
     }
 
-    if (!(msg = readall(stdin, &msglen)) || msglen == 0)
+    if (!(msg = read_all(stdin, &msglen)) || msglen == 0)
         return fail("stdin", "empty message");
 
     /* walk the headers: find From, collect -t recipients, mark Bcc blocks */
@@ -399,17 +399,17 @@ int sendmain(int argc, char **argv) {
             else if (nlen == 10 && !strncasecmp(msg + ls, "message-id", 10)) {
                 hasmid = 1;
                 if (!midhdr)
-                    midhdr = hdrvalue(msg, vs, be);
+                    midhdr = header_value(msg, vs, be);
             } else if (nlen == 10 && !strncasecmp(msg + ls, "hai-intent", 10)) {
                 if (!intent)
-                    intent = hdrvalue(msg, vs, be);
+                    intent = header_value(msg, vs, be);
             }
             if (nlen == 4 && !strncasecmp(msg + ls, "from", 4) && !from) {
                 char **one = NULL;
                 fromblk.start = ls;
                 fromblk.end = be;
-                if ((v = hdrvalue(msg, vs, be))) {
-                    addrsplit(v, &one);
+                if ((v = header_value(msg, vs, be))) {
+                    split_addresses(v, &one);
                     free(v);
                 }
                 if (arrlen(one))
@@ -418,15 +418,15 @@ int sendmain(int argc, char **argv) {
                     free(one[i]);
                 arrfree(one);
             } else if (tflag && ((nlen == 2 && !strncasecmp(msg + ls, "to", 2)) || (nlen == 2 && !strncasecmp(msg + ls, "cc", 2)))) {
-                if ((v = hdrvalue(msg, vs, be))) {
-                    addrsplit(v, &rcpts);
+                if ((v = header_value(msg, vs, be))) {
+                    split_addresses(v, &rcpts);
                     free(v);
                 }
             } else if (nlen == 3 && !strncasecmp(msg + ls, "bcc", 3)) {
                 if (tflag) {
                     Range r = {ls, be};
-                    if ((v = hdrvalue(msg, vs, be))) {
-                        addrsplit(v, &rcpts);
+                    if ((v = header_value(msg, vs, be))) {
+                        split_addresses(v, &rcpts);
                         free(v);
                     }
                     arrput(bccblk, r);
@@ -444,14 +444,14 @@ int sendmain(int argc, char **argv) {
      * one synthesized Message-ID is shared by every copy */
     if (!hasmid)
         snprintf(mid, sizeof mid, "<%ld.%d@%s>", (long)time(NULL), (int)getpid(), localdomain);
-    if (from && islocal(from) && strcasecmp(from, gateway))
+    if (from && is_local_address(from) && strcasecmp(from, gateway))
         buslocal = strdup(from);
     for (i = 0; i < arrlen(rcpts);) {
-        if (!islocal(rcpts[i])) {
+        if (!is_local_address(rcpts[i])) {
             i++;
             continue;
         }
-        if (deliverlocal(msg, msglen, bccblk, rcpts[i], hasdate, hasmid ? NULL : mid, hashdrs) != 0)
+        if (deliver_local(msg, msglen, bccblk, rcpts[i], hasdate, hasmid ? NULL : mid, hashdrs) != 0)
             goto out;
         if (!strcasecmp(rcpts[i], gateway))
             togw = 1;
@@ -460,7 +460,7 @@ int sendmain(int argc, char **argv) {
         free(rcpts[i]);
         arrdel(rcpts, i);
     }
-    if (arrlen(rcpts) && !(a = pickaccount(acctname, from))) {
+    if (arrlen(rcpts) && !(a = pick_account(acctname, from))) {
         rc = fail("account", "no such account");
         goto out;
     }
@@ -468,19 +468,19 @@ int sendmain(int argc, char **argv) {
      * a bus sender shown in the account's name (the outside would not
      * accept From: user@hai) */
     if (!hasmid && hashdrs) {
-        wput(&wire, "Message-ID: ");
-        wput(&wire, mid);
-        wput(&wire, "\n");
+        append_string(&wire, "Message-ID: ");
+        append_string(&wire, mid);
+        append_string(&wire, "\n");
     }
-    if (a && from && islocal(from) && fromblk.end) {
-        wput(&wire, "From: \"");
-        wput(&wire, from);
-        wput(&wire, "\" <");
-        wput(&wire, a->user);
-        wput(&wire, ">\n");
+    if (a && from && is_local_address(from) && fromblk.end) {
+        append_string(&wire, "From: \"");
+        append_string(&wire, from);
+        append_string(&wire, "\" <");
+        append_string(&wire, a->user);
+        append_string(&wire, ">\n");
         arrput(bccblk, fromblk); /* the original: skipped like a Bcc block */
         if (arrlen(bccblk) > 1)
-            qsort(bccblk, arrlenu(bccblk), sizeof *bccblk, rangecmp);
+            qsort(bccblk, arrlenu(bccblk), sizeof *bccblk, compare_ranges);
     }
     for (o = 0; o < msglen;) {
         size_t end = bi < arrlen(bccblk) ? bccblk[bi].start : msglen;
@@ -494,23 +494,23 @@ int sendmain(int argc, char **argv) {
     }
     /* the bus answering the outside: a message to the gateway address
      * that replies to something that crossed goes out too */
-    if (togw && gateway[0] && hashdrs && gwoutbound(wire, arrlenu(wire), err, sizeof err) < 0)
+    if (togw && gateway[0] && hashdrs && gateway_outbound(wire, arrlenu(wire), err, sizeof err) < 0)
         fprintf(stderr, "hml send: gateway: %s\n", err);
     if (!arrlen(rcpts)) {
         rc = 0;
         goto out;
     }
     if (!envfrom)
-        envfrom = from && !islocal(from) ? from : a->user;
-    if (smtpsubmit(a, envfrom, rcpts, wire, arrlenu(wire), err, sizeof err) < 0) {
+        envfrom = from && !is_local_address(from) ? from : a->user;
+    if (smtp_submit(a, envfrom, rcpts, wire, arrlenu(wire), err, sizeof err) < 0) {
         fprintf(stderr, "hml send: %s\n", err);
         goto out;
     }
     /* a bus message with an outside recipient as well: replies from
      * there come back to the bus address */
     if (buslocal && gateway[0] && hashdrs) {
-        id = gwid(midhdr ? midhdr : mid);
-        if (gwlogadd(id, buslocal, rcpts[0], a->name, intent ? intent : "") < 0)
+        id = gateway_message_id(midhdr ? midhdr : mid);
+        if (gateway_log_add(id, buslocal, rcpts[0], a->name, intent ? intent : "") < 0)
             fprintf(stderr, "hml send: gateway: cannot log %s\n", id);
         free(id);
     }

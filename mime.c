@@ -21,14 +21,14 @@ typedef struct {
     int hasatt; /* see Mail.hasatt */
 } Ctx;
 
-static void putn(char **b, const char *s, size_t n) {
+static void append_bytes(char **b, const char *s, size_t n) {
     if (n)
         memcpy(arraddnptr(*b, n), s, n);
 }
 
-static void putstr(char **b, const char *s) { putn(b, s, strlen(s)); }
+static void append_string(char **b, const char *s) { append_bytes(b, s, strlen(s)); }
 
-static void putcp(char **b, unsigned long cp) {
+static void append_codepoint(char **b, unsigned long cp) {
     char u[4];
     int n;
 
@@ -52,11 +52,11 @@ static void putcp(char **b, unsigned long cp) {
         n = 4;
     } else
         return;
-    putn(b, u, (size_t)n);
+    append_bytes(b, u, (size_t)n);
 }
 
 /* stb array -> malloc'd string; the array is freed */
-static char *fin(char **b) {
+static char *finish_string(char **b) {
     char *s;
 
     arrput(*b, '\0');
@@ -67,7 +67,7 @@ static char *fin(char **b) {
 }
 
 /* replace NULs and malformed UTF-8 in place so SQLite sees clean text */
-static void utf8fix(char *s) {
+static void sanitize_utf8(char *s) {
     size_t i = 0, k, n = strlen(s), j;
 
     while (i < n) {
@@ -96,7 +96,7 @@ static void utf8fix(char *s) {
     }
 }
 
-static const char *findci(const char *s, size_t n, const char *needle) {
+static const char *find_case_insensitive(const char *s, size_t n, const char *needle) {
     size_t k = strlen(needle), i;
 
     for (i = 0; i + k <= n; i++)
@@ -108,7 +108,7 @@ static const char *findci(const char *s, size_t n, const char *needle) {
 /* --- header block ------------------------------------------------------ */
 
 /* collect the headers; returns the offset where the body starts */
-static size_t headers(const char *s, size_t n, Hdr **out) {
+static size_t parse_headers(const char *s, size_t n, Hdr **out) {
     size_t i = 0;
 
     while (i < n) {
@@ -134,7 +134,7 @@ static size_t headers(const char *s, size_t n, Hdr **out) {
 }
 
 /* first header of that name, unfolded and trimmed; NULL if absent */
-static char *hget(Hdr *h, const char *name) {
+static char *header_get(Hdr *h, const char *name) {
     size_t k = strlen(name), i, j, n;
     char *v;
 
@@ -159,7 +159,7 @@ static char *hget(Hdr *h, const char *name) {
 
 /* --- decoders ---------------------------------------------------------- */
 
-static int b64val(int c) {
+static int base64_value(int c) {
     if (c >= 'A' && c <= 'Z')
         return c - 'A';
     if (c >= 'a' && c <= 'z')
@@ -173,7 +173,7 @@ static int b64val(int c) {
     return -1;
 }
 
-static void b64dec(char **out, const char *s, size_t n) {
+static void base64_decode(char **out, const char *s, size_t n) {
     unsigned acc = 0;
     int bits = 0, v;
     size_t i;
@@ -181,7 +181,7 @@ static void b64dec(char **out, const char *s, size_t n) {
     for (i = 0; i < n; i++) {
         if (s[i] == '=')
             break;
-        if ((v = b64val((unsigned char)s[i])) < 0)
+        if ((v = base64_value((unsigned char)s[i])) < 0)
             continue;
         acc = acc << 6 | (unsigned)v;
         bits += 6;
@@ -192,7 +192,7 @@ static void b64dec(char **out, const char *s, size_t n) {
     }
 }
 
-static int hexval(int c) {
+static int hex_value(int c) {
     if (c >= '0' && c <= '9')
         return c - '0';
     if (c >= 'a' && c <= 'f')
@@ -203,7 +203,7 @@ static int hexval(int c) {
 }
 
 /* quoted-printable; in header (RFC 2047 "Q") mode '_' is a space */
-static void qpdec(char **out, const char *s, size_t n, int hdr) {
+static void quoted_printable_decode(char **out, const char *s, size_t n, int hdr) {
     size_t i;
     int a, b;
 
@@ -213,7 +213,7 @@ static void qpdec(char **out, const char *s, size_t n, int hdr) {
                 i += s[i + 1] == '\r' && i + 2 < n && s[i + 2] == '\n' ? 2 : 1;
                 continue; /* soft line break */
             }
-            if (i + 2 < n && (a = hexval(s[i + 1])) >= 0 && (b = hexval(s[i + 2])) >= 0) {
+            if (i + 2 < n && (a = hex_value(s[i + 1])) >= 0 && (b = hex_value(s[i + 2])) >= 0) {
                 arrput(*out, (char)(a << 4 | b));
                 i += 2;
                 continue;
@@ -224,21 +224,21 @@ static void qpdec(char **out, const char *s, size_t n, int hdr) {
 }
 
 /* append in as UTF-8; unknown charsets and bad input degrade to '?' */
-static void toutf8(char **out, const char *cs, const char *in, size_t n) {
+static void convert_to_utf8(char **out, const char *cs, const char *in, size_t n) {
     char buf[4096], *ip = (char *)in, *op;
     size_t il = n, ol, r;
     iconv_t cd;
 
     if (!cs || !*cs || !strcasecmp(cs, "utf-8") || !strcasecmp(cs, "utf8") || !strcasecmp(cs, "us-ascii") || !strcasecmp(cs, "ascii") ||
         (cd = iconv_open("UTF-8", cs)) == (iconv_t)-1) {
-        putn(out, in, n);
+        append_bytes(out, in, n);
         return;
     }
     while (il) {
         op = buf;
         ol = sizeof buf;
         r = iconv(cd, &ip, &il, &op, &ol);
-        putn(out, buf, sizeof buf - ol);
+        append_bytes(out, buf, sizeof buf - ol);
         if (r != (size_t)-1)
             break;
         if (errno == EILSEQ) {
@@ -253,27 +253,27 @@ static void toutf8(char **out, const char *cs, const char *in, size_t n) {
 
 /* RFC 2047: "=?charset?B|Q?text?=" words, whitespace between two adjacent
  * words dropped; the rest of the value is passed through */
-static char *hdrdecode(const char *v) {
+static char *decode_header_words(const char *v) {
     char *out = NULL, *tmp, cs[64];
     const char *p = v, *q, *c1, *c2, *end, *lastend = NULL;
     size_t k;
 
     while (*p) {
         if (!(q = strstr(p, "=?"))) {
-            putstr(&out, p);
+            append_string(&out, p);
             break;
         }
         c1 = strchr(q + 2, '?');
         c2 = c1 ? strchr(c1 + 1, '?') : NULL;
         end = c2 ? strstr(c2 + 1, "?=") : NULL;
         if (!end || c2 - c1 != 2 || (size_t)(c1 - q - 2) >= sizeof cs) {
-            putn(&out, p, (size_t)(q + 2 - p));
+            append_bytes(&out, p, (size_t)(q + 2 - p));
             p = q + 2;
             lastend = NULL;
             continue;
         }
         if (!(lastend == p && (size_t)(q - p) == strspn(p, " \t")))
-            putn(&out, p, (size_t)(q - p));
+            append_bytes(&out, p, (size_t)(q - p));
         k = (size_t)(c1 - q - 2);
         memcpy(cs, q + 2, k);
         cs[k] = '\0';
@@ -281,20 +281,20 @@ static char *hdrdecode(const char *v) {
             *strchr(cs, '*') = '\0';
         tmp = NULL;
         if (c1[1] == 'B' || c1[1] == 'b')
-            b64dec(&tmp, c2 + 1, (size_t)(end - c2 - 1));
+            base64_decode(&tmp, c2 + 1, (size_t)(end - c2 - 1));
         else
-            qpdec(&tmp, c2 + 1, (size_t)(end - c2 - 1), 1);
-        toutf8(&out, cs, tmp, arrlenu(tmp));
+            quoted_printable_decode(&tmp, c2 + 1, (size_t)(end - c2 - 1), 1);
+        convert_to_utf8(&out, cs, tmp, arrlenu(tmp));
         arrfree(tmp);
         p = lastend = end + 2;
     }
-    return fin(&out);
+    return finish_string(&out);
 }
 
 /* --- Content-* header parameters --------------------------------------- */
 
 /* "type/subtype" lowercased, from the start of a Content-Type value */
-static void mediatype(const char *v, char *out, size_t cap) {
+static void media_type(const char *v, char *out, size_t cap) {
     size_t i;
 
     for (i = 0; i + 1 < cap && v[i] && v[i] != ';' && v[i] != ' ' && v[i] != '\t'; i++)
@@ -304,7 +304,7 @@ static void mediatype(const char *v, char *out, size_t cap) {
 
 /* find ";key=" or ";key*=" among the parameters of v (case-insensitive);
  * the value span (quotes stripped) and whether it was the extended form */
-static int pfind(const char *v, const char *key, const char **val, size_t *len, int *ext) {
+static int find_parameter(const char *v, const char *key, const char **val, size_t *len, int *ext) {
     size_t k = strlen(key);
     const char *p = v, *e;
 
@@ -341,7 +341,7 @@ static int pfind(const char *v, const char *key, const char **val, size_t *len, 
 
 /* charset'lang'percent-encoded (RFC 2231): the charset, malloc'd, and the
  * percent-decoded bytes appended to raw */
-static char *pdecode(char **raw, const char *p, size_t n, int first) {
+static char *decode_extended_parameter(char **raw, const char *p, size_t n, int first) {
     char *cs = NULL;
     const char *q, *r, *end = p + n;
 
@@ -353,7 +353,7 @@ static char *pdecode(char **raw, const char *p, size_t n, int first) {
     }
     for (; p < end; p++) {
         int a, b;
-        if (*p == '%' && p + 2 < end && (a = hexval(p[1])) >= 0 && (b = hexval(p[2])) >= 0) {
+        if (*p == '%' && p + 2 < end && (a = hex_value(p[1])) >= 0 && (b = hex_value(p[2])) >= 0) {
             arrput(*raw, (char)(a << 4 | b));
             p += 2;
         } else
@@ -365,7 +365,7 @@ static char *pdecode(char **raw, const char *p, size_t n, int first) {
 /* value of a ;name= parameter, unquoted, malloc'd; RFC 2231 name*=
  * decoded to UTF-8 and name*0*= name*1*= ... continuations joined;
  * NULL if absent */
-static char *param(const char *v, const char *name) {
+static char *parameter_value(const char *v, const char *name) {
     char key[96], *out = NULL, *raw = NULL, *cs = NULL, *c2;
     const char *val;
     size_t n;
@@ -373,37 +373,37 @@ static char *param(const char *v, const char *name) {
 
     for (k = 0;; k++) { /* continuations */
         snprintf(key, sizeof key, "%s*%d", name, k);
-        if (!pfind(v, key, &val, &n, &ext))
+        if (!find_parameter(v, key, &val, &n, &ext))
             break;
         if (ext) {
-            c2 = pdecode(&raw, val, n, k == 0);
+            c2 = decode_extended_parameter(&raw, val, n, k == 0);
             if (c2 && !cs)
                 cs = c2;
             else
                 free(c2);
         } else
-            putn(&raw, val, n);
+            append_bytes(&raw, val, n);
     }
     if (!k) { /* the single-value forms */
-        if (!pfind(v, name, &val, &n, &ext))
+        if (!find_parameter(v, name, &val, &n, &ext))
             return NULL;
         if (ext)
-            cs = pdecode(&raw, val, n, 1);
+            cs = decode_extended_parameter(&raw, val, n, 1);
         else
-            putn(&raw, val, n);
+            append_bytes(&raw, val, n);
     }
     if (cs) {
-        toutf8(&out, cs, raw, arrlenu(raw));
+        convert_to_utf8(&out, cs, raw, arrlenu(raw));
         free(cs);
     } else
-        putn(&out, raw, arrlenu(raw));
+        append_bytes(&out, raw, arrlenu(raw));
     arrfree(raw);
-    return fin(&out);
+    return finish_string(&out);
 }
 
 /* --- dates ------------------------------------------------------------- */
 
-static long long civil(long y, int m, int d) { /* days since 1970-01-01 */
+static long long days_from_civil(long y, int m, int d) { /* days since 1970-01-01 */
     long long era, doe, yoe, doy;
 
     y -= m <= 2;
@@ -415,7 +415,7 @@ static long long civil(long y, int m, int d) { /* days since 1970-01-01 */
 }
 
 /* RFC 5322 date, tolerant of the usual deviations; 0 if hopeless */
-static long parsedate(const char *s) {
+static long parse_date(const char *s) {
     static const char *mon = "janfebmaraprmayjunjulaugsepoctnovdec";
     static const struct {
         const char *name;
@@ -474,12 +474,12 @@ static long parsedate(const char *s) {
         for (i = 0; i < sizeof zones / sizeof *zones; i++)
             if (!strncasecmp(p, zones[i].name, strlen(zones[i].name)))
                 off = zones[i].off * 3600;
-    return (long)(civil(year, month + 1, (int)day) * 86400 + hh * 3600 + mm * 60 + ss - off);
+    return (long)(days_from_civil(year, month + 1, (int)day) * 86400 + hh * 3600 + mm * 60 + ss - off);
 }
 
 /* --- body text --------------------------------------------------------- */
 
-static void entity(char **out, const char *s, size_t n, size_t *adv) {
+static void decode_html_entity(char **out, const char *s, size_t n, size_t *adv) {
     static const struct {
         const char *name;
         const char *rep;
@@ -496,18 +496,18 @@ static void entity(char **out, const char *s, size_t n, size_t *adv) {
     *adv = k + 1;
     if (s[1] == '#') {
         unsigned long cp = s[2] == 'x' || s[2] == 'X' ? strtoul(s + 3, NULL, 16) : strtoul(s + 2, NULL, 10);
-        putcp(out, cp ? cp : '?');
+        append_codepoint(out, cp ? cp : '?');
         return;
     }
     for (i = 0; i < sizeof ents / sizeof *ents; i++)
         if (strlen(ents[i].name) == k - 1 && !strncmp(s + 1, ents[i].name, k - 1)) {
-            putstr(out, ents[i].rep);
+            append_string(out, ents[i].rep);
             return;
         }
-    putn(out, s, k + 1); /* unknown: keep as written */
+    append_bytes(out, s, k + 1); /* unknown: keep as written */
 }
 
-static int blocktag(const char *t, size_t n) {
+static int is_block_tag(const char *t, size_t n) {
     static const char *blocks[] = {"br", "p",     "div", "tr", "li", "h1", "h2", "h3",  "h4",        "h5",
                                    "h6", "table", "hr",  "td", "th", "ul", "ol", "pre", "blockquote"};
     size_t i;
@@ -520,7 +520,7 @@ static int blocktag(const char *t, size_t n) {
 
 /* HTML to text: tags dropped, style/script bodies skipped, entities
  * decoded, whitespace collapsed */
-static void htmltext(char **out, const char *s, size_t n) {
+static void html_to_text(char **out, const char *s, size_t n) {
     size_t i = 0, j, ns, adv;
     int sp = 1, close;
     const char *e;
@@ -528,7 +528,7 @@ static void htmltext(char **out, const char *s, size_t n) {
     while (i < n) {
         if (s[i] == '<') {
             if (i + 4 <= n && !memcmp(s + i, "<!--", 4)) {
-                e = findci(s + i + 4, n - i - 4, "-->");
+                e = find_case_insensitive(s + i + 4, n - i - 4, "-->");
                 i = e ? (size_t)(e - s) + 3 : n;
                 continue;
             }
@@ -539,17 +539,17 @@ static void htmltext(char **out, const char *s, size_t n) {
             ns = j;
             while (j < n && isalnum((unsigned char)s[j]))
                 j++;
-            if (blocktag(s + ns, j - ns)) {
+            if (is_block_tag(s + ns, j - ns)) {
                 arrput(*out, '\n');
                 sp = 1;
             }
             if (!close && (j - ns == 5 && !strncasecmp(s + ns, "style", 5))) {
-                e = findci(s + j, n - j, "</style");
+                e = find_case_insensitive(s + j, n - j, "</style");
                 i = e ? (size_t)(e - s) : n;
                 continue;
             }
             if (!close && (j - ns == 6 && !strncasecmp(s + ns, "script", 6))) {
-                e = findci(s + j, n - j, "</script");
+                e = find_case_insensitive(s + j, n - j, "</script");
                 i = e ? (size_t)(e - s) : n;
                 continue;
             }
@@ -559,7 +559,7 @@ static void htmltext(char **out, const char *s, size_t n) {
             continue;
         }
         if (s[i] == '&') {
-            entity(out, s + i, n - i, &adv);
+            decode_html_entity(out, s + i, n - i, &adv);
             i += adv;
             sp = 0;
             continue;
@@ -577,22 +577,22 @@ static void htmltext(char **out, const char *s, size_t n) {
 }
 
 /* undo the Content-Transfer-Encoding; stb array */
-static char *ctedecode(const char *cte, const char *s, size_t n) {
+static char *decode_transfer_encoding(const char *cte, const char *s, size_t n) {
     char *out = NULL;
 
     if (cte && !strncasecmp(cte, "base64", 6))
-        b64dec(&out, s, n);
+        base64_decode(&out, s, n);
     else if (cte && !strncasecmp(cte, "quoted-printable", 16))
-        qpdec(&out, s, n, 0);
+        quoted_printable_decode(&out, s, n, 0);
     else
-        putn(&out, s, n);
+        append_bytes(&out, s, n);
     return out;
 }
 
 typedef void (*Partfn)(void *ud, const char *s, size_t n);
 
 /* the parts between --boundary lines, each handed to fn as an entity */
-static void multipart(const char *s, size_t n, const char *b, Partfn fn, void *ud) {
+static void walk_multipart(const char *s, size_t n, const char *b, Partfn fn, void *ud) {
     size_t bl = strlen(b), pos = 0, start = 0, end;
     const char *nl;
     int in = 0;
@@ -614,27 +614,27 @@ static void multipart(const char *s, size_t n, const char *b, Partfn fn, void *u
         fn(ud, s + start, n - start);
 }
 
-static void walk(Ctx *c, const char *s, size_t n);
+static void walk_entity(Ctx *c, const char *s, size_t n);
 
-static void walkpart(void *ud, const char *s, size_t n) { walk(ud, s, n); }
+static void walk_part(void *ud, const char *s, size_t n) { walk_entity(ud, s, n); }
 
 /* one entity: its own header block, then whatever the type says */
-static void walk(Ctx *c, const char *s, size_t n) {
+static void walk_entity(Ctx *c, const char *s, size_t n) {
     Hdr *h = NULL;
-    size_t bo = headers(s, n, &h);
-    char *ct = hget(h, "Content-Type"), *cte = hget(h, "Content-Transfer-Encoding"), *cd = hget(h, "Content-Disposition"), *fn = NULL, *b, *dec, *u, *cs,
-         type[128] = "text/plain";
+    size_t bo = parse_headers(s, n, &h);
+    char *ct = header_get(h, "Content-Type"), *cte = header_get(h, "Content-Transfer-Encoding"), *cd = header_get(h, "Content-Disposition"), *fn = NULL, *b,
+         *dec, *u, *cs, type[128] = "text/plain";
 
     if (ct)
-        mediatype(ct, type, sizeof type);
+        media_type(ct, type, sizeof type);
     if (cd)
-        fn = param(cd, "filename");
+        fn = parameter_value(cd, "filename");
     if (!fn && ct)
-        fn = param(ct, "name");
+        fn = parameter_value(ct, "name");
     {
         /* a signature part (smime.p7s, signature.asc) travels as an
          * attachment but is not one to a reader */
-        char *cid = hget(h, "Content-ID");
+        char *cid = header_get(h, "Content-ID");
         int sig = !strcmp(type, "application/pkcs7-signature") || !strcmp(type, "application/x-pkcs7-signature") || !strcmp(type, "application/pgp-signature");
         if (!sig && ((cd && !strncasecmp(cd, "attachment", 10)) ||
                      (fn && !cid && strncmp(type, "multipart/", 10) && strcmp(type, "message/rfc822") && strncmp(type, "text/", 5))))
@@ -642,34 +642,34 @@ static void walk(Ctx *c, const char *s, size_t n) {
         free(cid);
     }
     if (fn) {
-        char *d = hdrdecode(fn);
-        putstr(&c->attach, d);
+        char *d = decode_header_words(fn);
+        append_string(&c->attach, d);
         arrput(c->attach, ' ');
         free(d);
         free(fn);
     }
     if (!strncmp(type, "multipart/", 10) && ct && c->depth < DepthMax) {
-        if ((b = param(ct, "boundary"))) {
+        if ((b = parameter_value(ct, "boundary"))) {
             c->depth++;
-            multipart(s + bo, n - bo, b, walkpart, c);
+            walk_multipart(s + bo, n - bo, b, walk_part, c);
             c->depth--;
             free(b);
         }
     } else if (!strcmp(type, "message/rfc822") && c->depth < DepthMax) {
-        dec = ctedecode(cte, s + bo, n - bo);
+        dec = decode_transfer_encoding(cte, s + bo, n - bo);
         c->depth++;
-        walk(c, dec, arrlenu(dec));
+        walk_entity(c, dec, arrlenu(dec));
         c->depth--;
         arrfree(dec);
     } else if (!strncmp(type, "text/", 5) && arrlen(c->body) < BodyMax) {
-        dec = ctedecode(cte, s + bo, n - bo);
-        cs = ct ? param(ct, "charset") : NULL;
+        dec = decode_transfer_encoding(cte, s + bo, n - bo);
+        cs = ct ? parameter_value(ct, "charset") : NULL;
         u = NULL;
-        toutf8(&u, cs, dec, arrlenu(dec));
+        convert_to_utf8(&u, cs, dec, arrlenu(dec));
         if (!strcmp(type, "text/html"))
-            htmltext(&c->body, u, arrlenu(u));
+            html_to_text(&c->body, u, arrlenu(u));
         else
-            putn(&c->body, u, arrlenu(u));
+            append_bytes(&c->body, u, arrlenu(u));
         arrput(c->body, '\n');
         arrfree(u);
         arrfree(dec);
@@ -688,36 +688,36 @@ typedef struct {
     int depth;
 } Plain;
 
-static void plainpart(void *ud, const char *s, size_t n);
+static void find_plain_text_part(void *ud, const char *s, size_t n);
 
 /* the first text/plain leaf that is not an attachment, and failing
  * that the first text/html, decoded to UTF-8 */
-static void plainwalk(Plain *p, const char *s, size_t n) {
+static void find_plain_text(Plain *p, const char *s, size_t n) {
     Hdr *h = NULL;
-    size_t bo = headers(s, n, &h);
-    char *ct = hget(h, "Content-Type"), *cte = hget(h, "Content-Transfer-Encoding"), *cd = hget(h, "Content-Disposition"), *b, *dec, *cs, *u,
+    size_t bo = parse_headers(s, n, &h);
+    char *ct = header_get(h, "Content-Type"), *cte = header_get(h, "Content-Transfer-Encoding"), *cd = header_get(h, "Content-Disposition"), *b, *dec, *cs, *u,
          type[128] = "text/plain";
     int att = cd && !strncasecmp(cd, "attachment", 10);
 
     if (ct)
-        mediatype(ct, type, sizeof type);
+        media_type(ct, type, sizeof type);
     if (!strncmp(type, "multipart/", 10) && ct && p->depth < DepthMax) {
-        if ((b = param(ct, "boundary"))) {
+        if ((b = parameter_value(ct, "boundary"))) {
             p->depth++;
-            multipart(s + bo, n - bo, b, plainpart, p);
+            walk_multipart(s + bo, n - bo, b, find_plain_text_part, p);
             p->depth--;
             free(b);
         }
     } else if (!att && ((!strcmp(type, "text/plain") && !p->plain) || (!strcmp(type, "text/html") && !p->html))) {
         char **out = type[5] == 'p' ? &p->plain : &p->html;
-        dec = ctedecode(cte, s + bo, n - bo);
-        cs = ct ? param(ct, "charset") : NULL;
+        dec = decode_transfer_encoding(cte, s + bo, n - bo);
+        cs = ct ? parameter_value(ct, "charset") : NULL;
         u = NULL;
-        toutf8(&u, cs, dec, arrlenu(dec));
+        convert_to_utf8(&u, cs, dec, arrlenu(dec));
         if (type[5] == 'h')
-            htmltext(out, u, arrlenu(u));
+            html_to_text(out, u, arrlenu(u));
         else
-            putn(out, u, arrlenu(u));
+            append_bytes(out, u, arrlenu(u));
         arrfree(u);
         arrfree(dec);
         free(cs);
@@ -728,28 +728,28 @@ static void plainwalk(Plain *p, const char *s, size_t n) {
     arrfree(h);
 }
 
-static void plainpart(void *ud, const char *s, size_t n) { plainwalk(ud, s, n); }
+static void find_plain_text_part(void *ud, const char *s, size_t n) { find_plain_text(ud, s, n); }
 
-char *mimeplain(const char *s, size_t n) {
+char *mime_plain_text(const char *s, size_t n) {
     Plain p = {NULL, NULL, 0};
     char *r;
 
-    plainwalk(&p, s, n);
+    find_plain_text(&p, s, n);
     if (p.plain) {
-        r = fin(&p.plain);
+        r = finish_string(&p.plain);
         arrfree(p.html);
     } else if (p.html)
-        r = fin(&p.html);
+        r = finish_string(&p.html);
     else
         r = strdup("");
-    utf8fix(r);
+    sanitize_utf8(r);
     return r;
 }
 
 /* --- message ----------------------------------------------------------- */
 
 /* next <...> token in v; NULL when none remain */
-static char *angle(const char **v) {
+static char *next_bracketed_id(const char **v) {
     const char *lt = strchr(*v, '<'), *gt;
     char *r;
 
@@ -762,7 +762,7 @@ static char *angle(const char **v) {
     return r;
 }
 
-static void addref(Mail *m, char *id) {
+static void add_reference(Mail *m, char *id) {
     ptrdiff_t i;
 
     if (!strcmp(id, m->mid)) {
@@ -777,18 +777,18 @@ static void addref(Mail *m, char *id) {
     arrput(m->refs, id);
 }
 
-static char *hdrtext(Hdr *h, const char *name) {
-    char *raw = hget(h, name), *d;
+static char *header_text(Hdr *h, const char *name) {
+    char *raw = header_get(h, name), *d;
 
     if (!raw)
         return strdup("");
-    d = hdrdecode(raw);
+    d = decode_header_words(raw);
     free(raw);
-    utf8fix(d);
+    sanitize_utf8(d);
     return d;
 }
 
-int mailparse(const char *buf, size_t n, Mail *m) {
+int mail_parse(const char *buf, size_t n, Mail *m) {
     Hdr *h = NULL;
     Ctx c = {NULL, NULL, 0, 0};
     char *v, *cc, *id;
@@ -796,10 +796,10 @@ int mailparse(const char *buf, size_t n, Mail *m) {
     size_t i;
 
     memset(m, 0, sizeof *m);
-    headers(buf, n, &h);
-    if ((v = hget(h, "Message-ID"))) {
+    parse_headers(buf, n, &h);
+    if ((v = header_get(h, "Message-ID"))) {
         p = v;
-        if ((id = angle(&p)))
+        if ((id = next_bracketed_id(&p)))
             m->mid = id;
         else if (*v)
             m->mid = strdup(v);
@@ -813,13 +813,13 @@ int mailparse(const char *buf, size_t n, Mail *m) {
         snprintf(tmp, sizeof tmp, "hml.%016llx", (unsigned long long)hash);
         m->mid = strdup(tmp);
     }
-    utf8fix(m->mid);
-    m->subject = hdrtext(h, "Subject");
-    m->intent = hdrtext(h, "Hai-Intent");
-    m->from = hdrtext(h, "From");
-    m->to = hdrtext(h, "To");
+    sanitize_utf8(m->mid);
+    m->subject = header_text(h, "Subject");
+    m->intent = header_text(h, "Hai-Intent");
+    m->from = header_text(h, "From");
+    m->to = header_text(h, "To");
     for (i = 0; i < 2; i++) { /* To, Cc and Bcc all count as recipients */
-        cc = hdrtext(h, i ? "Bcc" : "Cc");
+        cc = header_text(h, i ? "Bcc" : "Cc");
         if (*cc) {
             size_t a = strlen(m->to), b = strlen(cc);
             m->to = realloc(m->to, a + b + 3);
@@ -827,31 +827,31 @@ int mailparse(const char *buf, size_t n, Mail *m) {
         }
         free(cc);
     }
-    if ((v = hget(h, "Date"))) {
-        m->date = parsedate(v);
+    if ((v = header_get(h, "Date"))) {
+        m->date = parse_date(v);
         free(v);
     }
-    if ((v = hget(h, "References"))) {
-        for (p = v; (id = angle(&p));)
-            addref(m, id);
+    if ((v = header_get(h, "References"))) {
+        for (p = v; (id = next_bracketed_id(&p));)
+            add_reference(m, id);
         free(v);
     }
-    if ((v = hget(h, "In-Reply-To"))) {
-        for (p = v; (id = angle(&p));)
-            addref(m, id);
+    if ((v = header_get(h, "In-Reply-To"))) {
+        for (p = v; (id = next_bracketed_id(&p));)
+            add_reference(m, id);
         free(v);
     }
     arrfree(h);
-    walk(&c, buf, n);
-    m->attach = fin(&c.attach);
-    m->body = fin(&c.body);
+    walk_entity(&c, buf, n);
+    m->attach = finish_string(&c.attach);
+    m->body = finish_string(&c.body);
     m->hasatt = c.hasatt;
-    utf8fix(m->attach);
-    utf8fix(m->body);
+    sanitize_utf8(m->attach);
+    sanitize_utf8(m->body);
     return 0;
 }
 
-void mailfree(Mail *m) {
+void mail_free(Mail *m) {
     ptrdiff_t i;
 
     free(m->mid);
@@ -869,19 +869,19 @@ void mailfree(Mail *m) {
 
 /* --- exported primitives (show.c) --------------------------------------- */
 
-size_t mimehdrs(const char *s, size_t n, Hdr **out) { return headers(s, n, out); }
-char *mimehget(Hdr *h, const char *name) { return hget(h, name); }
-char *mimedecode(const char *v) { return hdrdecode(v); }
-void mimetype(const char *ct, char *out, size_t cap) { mediatype(ct, out, cap); }
-char *mimeparam(const char *v, const char *name) { return param(v, name); }
-char *mimecte(const char *cte, const char *s, size_t n) { return ctedecode(cte, s, n); }
-void mimeutf8(char **out, const char *cs, const char *in, size_t n) { toutf8(out, cs, in, n); }
-void mimehtmltext(char **out, const char *s, size_t n) { htmltext(out, s, n); }
-long mimedate(const char *s) { return parsedate(s); }
+size_t mime_parse_headers(const char *s, size_t n, Hdr **out) { return parse_headers(s, n, out); }
+char *mime_header_get(Hdr *h, const char *name) { return header_get(h, name); }
+char *mime_decode_header(const char *v) { return decode_header_words(v); }
+void mime_media_type(const char *ct, char *out, size_t cap) { media_type(ct, out, cap); }
+char *mime_parameter(const char *v, const char *name) { return parameter_value(v, name); }
+char *mime_decode_transfer_encoding(const char *cte, const char *s, size_t n) { return decode_transfer_encoding(cte, s, n); }
+void mime_convert_to_utf8(char **out, const char *cs, const char *in, size_t n) { convert_to_utf8(out, cs, in, n); }
+void mime_html_to_text(char **out, const char *s, size_t n) { html_to_text(out, s, n); }
+long mime_parse_date(const char *s) { return parse_date(s); }
 
 /* split an address header on the commas between mailboxes (not the ones
  * inside quotes or <>), each trimmed; stb array of malloc'd strings */
-void mimeaddrs(const char *v, char ***out) {
+void mime_split_addresses(const char *v, char ***out) {
     const char *p = v, *start = v;
     int quote = 0, angle = 0;
 
@@ -912,7 +912,7 @@ void mimeaddrs(const char *v, char ***out) {
 }
 
 /* the bare address of a mailbox, lowercased */
-void mimeaddr(const char *m, char *out, size_t cap) {
+void mime_bare_address(const char *m, char *out, size_t cap) {
     const char *lt = strchr(m, '<'), *gt = lt ? strchr(lt, '>') : NULL, *s, *e;
     size_t i, n;
 

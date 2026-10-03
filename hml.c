@@ -40,7 +40,7 @@ void report(const char *label, const char *fmt, ...) {
     pthread_mutex_unlock(&outmtx);
 }
 
-char *runpasscmd(const char *cmd, char *err, size_t errlen) {
+char *run_password_command(const char *cmd, char *err, size_t errlen) {
     char buf[256];
     FILE *p;
     size_t n;
@@ -60,14 +60,14 @@ char *runpasscmd(const char *cmd, char *err, size_t errlen) {
     return strdup(buf);
 }
 
-void expand(const char *path, char *dst, size_t cap) {
+void expand_home(const char *path, char *dst, size_t cap) {
     if (path[0] == '~')
         snprintf(dst, cap, "%s%s", getenv("HOME"), path + 1);
     else
         snprintf(dst, cap, "%s", path);
 }
 
-int boxroot(const char *box, char *out, size_t cap) {
+int box_directory(const char *box, char *out, size_t cap) {
     const char *slash = strchr(box, '/');
     char root[4096];
     size_t n;
@@ -78,12 +78,12 @@ int boxroot(const char *box, char *out, size_t cap) {
     n = (size_t)(slash - box);
     for (a = 0; a < naccounts; a++)
         if (n == strlen(accounts[a].name) && !strncmp(box, accounts[a].name, n)) {
-            expand(accounts[a].maildir, root, sizeof root);
+            expand_home(accounts[a].maildir, root, sizeof root);
             snprintf(out, cap, "%s/%s", root, slash + 1);
             return 1;
         }
     if (n == strlen(localdomain) && !strncmp(box, localdomain, n)) {
-        expand(localbox, root, sizeof root);
+        expand_home(localbox, root, sizeof root);
         snprintf(out, cap, "%s/%s", root, slash + 1);
         return 1;
     }
@@ -93,7 +93,7 @@ int boxroot(const char *box, char *out, size_t cap) {
 /* the local boxes have no server to expunge on: `hml recv` removes
  * their files flagged T (deleted) itself, cur/ and new/ of every
  * maildir under dir, as deep as the index looks */
-static long expungelocal(const char *dir, int depth) {
+static long expunge_local_boxes(const char *dir, int depth) {
     static const char *const subs[] = {"cur", "new"};
     char path[4400];
     struct dirent *e;
@@ -123,25 +123,25 @@ static long expungelocal(const char *dir, int depth) {
             continue;
         snprintf(path, sizeof path, "%.4000s/%.300s", dir, e->d_name);
         if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
-            n += expungelocal(path, depth + 1);
+            n += expunge_local_boxes(path, depth + 1);
     }
     closedir(dp);
     return n;
 }
 
-static Imap *acctconnect(const Account *a, const char *pass, char *err, size_t errlen) {
-    Imap *im = imapconnect(a->host, a->port, err, errlen);
+static Imap *account_connect(const Account *a, const char *pass, char *err, size_t errlen) {
+    Imap *im = imap_connect(a->host, a->port, err, errlen);
 
     if (!im)
         return NULL;
-    if (imaplogin(im, a->user, pass, err, errlen) < 0) {
-        imapclose(im);
+    if (imap_login(im, a->user, pass, err, errlen) < 0) {
+        imap_close(im);
         return NULL;
     }
     return im;
 }
 
-static void *accountmain(void *arg) {
+static void *account_thread(void *arg) {
     Job *j = arg;
     const Account *a = j->a;
     char err[256];
@@ -150,36 +150,36 @@ static void *accountmain(void *arg) {
     int i, rc;
 
     pthread_mutex_lock(&pwmtx);
-    pass = runpasscmd(a->passcmd, err, sizeof err);
+    pass = run_password_command(a->passcmd, err, sizeof err);
     pthread_mutex_unlock(&pwmtx);
     if (!pass) {
         report(a->name, "error: %s", err);
         j->rc = 2;
         return NULL;
     }
-    im = acctconnect(a, pass, err, sizeof err);
+    im = account_connect(a, pass, err, sizeof err);
     if (!im) {
         report(a->name, "error: %s", err);
         j->rc = 2;
         goto out;
     }
     for (i = 0; i < a->nchannels; i++) {
-        rc = syncbox(im, a, &a->channels[i], j->mode, j->force);
+        rc = sync_box(im, a, &a->channels[i], j->mode, j->force);
         if (rc == 2) {
             /* Gmail drops long-lived connections mid-listing now and then;
              * reconnect and give the folder one more try */
-            imapclose(im);
-            if (!(im = acctconnect(a, pass, err, sizeof err))) {
+            imap_close(im);
+            if (!(im = account_connect(a, pass, err, sizeof err))) {
                 report(a->name, "error: reconnect: %s", err);
                 j->rc = 2;
                 goto out;
             }
-            rc = syncbox(im, a, &a->channels[i], j->mode, j->force);
+            rc = sync_box(im, a, &a->channels[i], j->mode, j->force);
         }
         if (rc > j->rc)
             j->rc = rc;
     }
-    imapclose(im);
+    imap_close(im);
 out:
     memset(pass, 0, strlen(pass));
     free(pass);
@@ -227,23 +227,23 @@ int main(int argc, char *argv[]) {
         } else if (!strcmp(argv[1], "status")) {
             i = 2;
         } else if (!strcmp(argv[1], "send")) {
-            return sendmain(argc - 2, argv + 2);
+            return send_main(argc - 2, argv + 2);
         } else if (!strcmp(argv[1], "new")) {
-            return newmain(argc - 2, argv + 2);
+            return new_main(argc - 2, argv + 2);
         } else if (!strcmp(argv[1], "search")) {
-            return searchmain(argc - 2, argv + 2);
+            return search_main(argc - 2, argv + 2);
         } else if (!strcmp(argv[1], "count")) {
-            return countmain(argc - 2, argv + 2);
+            return count_main(argc - 2, argv + 2);
         } else if (!strcmp(argv[1], "tags")) {
-            return tagsmain(argc - 2, argv + 2);
+            return tags_main(argc - 2, argv + 2);
         } else if (!strcmp(argv[1], "address")) {
-            return addressmain(argc - 2, argv + 2);
+            return address_main(argc - 2, argv + 2);
         } else if (!strcmp(argv[1], "tag")) {
-            return tagmain(argc - 2, argv + 2);
+            return tag_main(argc - 2, argv + 2);
         } else if (!strcmp(argv[1], "show")) {
-            return showmain(argc - 2, argv + 2);
+            return show_main(argc - 2, argv + 2);
         } else if (!strcmp(argv[1], "reply")) {
-            return replymain(argc - 2, argv + 2);
+            return reply_main(argc - 2, argv + 2);
         } else {
             /* not a command: an account name filters the status report */
             for (k = 0; k < naccounts; k++)
@@ -293,7 +293,7 @@ int main(int argc, char *argv[]) {
     signal(SIGPIPE, SIG_IGN);
     clock_gettime(CLOCK_MONOTONIC, &t0);
     for (i = 0; i < njobs; i++)
-        pthread_create(&tid[i], NULL, accountmain, &jobs[i]);
+        pthread_create(&tid[i], NULL, account_thread, &jobs[i]);
     for (i = 0; i < njobs; i++) {
         pthread_join(tid[i], NULL);
         if (jobs[i].rc > rc)
@@ -304,8 +304,8 @@ int main(int argc, char *argv[]) {
     if (mode == MSync) {
         char root[4096];
         long n;
-        expand(localbox, root, sizeof root);
-        if ((n = expungelocal(root, 1)) > 0)
+        expand_home(localbox, root, sizeof root);
+        if ((n = expunge_local_boxes(root, 1)) > 0)
             printf("%s: %ld expunged\n", localdomain, n);
     }
     fflush(stdout); /* keep our output ahead of the hook's */

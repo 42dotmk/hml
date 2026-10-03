@@ -26,7 +26,7 @@ struct Imap {
     int sinkcr; /* carry: last literal byte was CR */
 };
 
-static int readbyte(Imap *im) {
+static int read_byte(Imap *im) {
     if (im->rdoff == im->rdlen) {
         int n = SSL_read(im->ssl, im->rd, sizeof im->rd);
         if (n <= 0)
@@ -37,7 +37,7 @@ static int readbyte(Imap *im) {
     return (unsigned char)im->rd[im->rdoff++];
 }
 
-static int pushbyte(Imap *im, char c) {
+static int push_byte(Imap *im, char c) {
     if (im->len + 2 > im->cap) {
         size_t ncap = im->cap ? im->cap * 2 : 4096;
         char *p = realloc(im->line, ncap);
@@ -52,7 +52,7 @@ static int pushbyte(Imap *im, char c) {
 
 /* does the line end in an IMAP literal marker {N}? if so return N and the
  * offset of the '{' so it can be stripped */
-static int literalat(const char *s, size_t len, size_t *n, size_t *at) {
+static int find_literal_marker(const char *s, size_t len, size_t *n, size_t *at) {
     size_t i = len;
 
     if (!i || s[i - 1] != '}')
@@ -68,7 +68,7 @@ static int literalat(const char *s, size_t len, size_t *n, size_t *at) {
 
 /* consume a literal of n bytes; when it is message body and a sink is set,
  * stream it there with CRLF collapsed to LF (maildir stores bare LF) */
-static int literalcopy(Imap *im, size_t n, int tosink) {
+static int copy_literal(Imap *im, size_t n, int tosink) {
     while (n) {
         if (im->rdoff == im->rdlen) {
             int r = SSL_read(im->ssl, im->rd, sizeof im->rd);
@@ -106,16 +106,16 @@ static int literalcopy(Imap *im, size_t n, int tosink) {
 
 /* read one logical reply line; literal payloads go to the sink when they are
  * message body, and are skipped otherwise */
-static char *readline(Imap *im, char *err, size_t errlen) {
+static char *read_line(Imap *im, char *err, size_t errlen) {
     im->len = 0;
     for (;;) {
-        int c = readbyte(im);
+        int c = read_byte(im);
         if (c < 0) {
             snprintf(err, errlen, "connection lost");
             return NULL;
         }
         if (c != '\n') {
-            if (pushbyte(im, (char)c) < 0) {
+            if (push_byte(im, (char)c) < 0) {
                 snprintf(err, errlen, "out of memory");
                 return NULL;
             }
@@ -124,12 +124,12 @@ static char *readline(Imap *im, char *err, size_t errlen) {
         if (im->len && im->line[im->len - 1] == '\r')
             im->len--;
         size_t n, at;
-        if (literalat(im->line, im->len, &n, &at)) {
+        if (find_literal_marker(im->line, im->len, &n, &at)) {
             int tosink;
             im->len = at;
             im->line[im->len] = '\0';
             tosink = im->sink && strstr(im->line, "BODY[") != NULL;
-            if (literalcopy(im, n, tosink) < 0) {
+            if (copy_literal(im, n, tosink) < 0) {
                 snprintf(err, errlen, "connection lost");
                 return NULL;
             }
@@ -140,7 +140,7 @@ static char *readline(Imap *im, char *err, size_t errlen) {
     }
 }
 
-static int writeall(Imap *im, const char *s, size_t n) {
+static int write_all(Imap *im, const char *s, size_t n) {
     while (n) {
         int w = SSL_write(im->ssl, s, n > 16384 ? 16384 : (int)n);
         if (w <= 0)
@@ -151,7 +151,7 @@ static int writeall(Imap *im, const char *s, size_t n) {
     return 0;
 }
 
-Imap *tlsconnect(const char *host, int port, char *err, size_t errlen) {
+Imap *tls_connect(const char *host, int port, char *err, size_t errlen) {
     Imap *im;
     struct addrinfo hints, *res, *ai;
     char portstr[8];
@@ -206,29 +206,29 @@ Imap *tlsconnect(const char *host, int port, char *err, size_t errlen) {
 
 tlsfail:
     snprintf(err, errlen, "TLS to %s failed: %s", host, ERR_reason_error_string(ERR_get_error()));
-    imapclose(im);
+    imap_close(im);
     return NULL;
 }
 
-char *imapline(Imap *im, char *err, size_t errlen) { return readline(im, err, errlen); }
+char *imap_read_line(Imap *im, char *err, size_t errlen) { return read_line(im, err, errlen); }
 
-int imapwrite(Imap *im, const char *s, size_t n) { return writeall(im, s, n); }
+int imap_write(Imap *im, const char *s, size_t n) { return write_all(im, s, n); }
 
-Imap *imapconnect(const char *host, int port, char *err, size_t errlen) {
+Imap *imap_connect(const char *host, int port, char *err, size_t errlen) {
     char tmp[8];
-    Imap *im = tlsconnect(host, port, err, errlen);
+    Imap *im = tls_connect(host, port, err, errlen);
 
     if (!im)
         return NULL;
-    if (!readline(im, tmp, sizeof tmp) || strncmp(im->line, "* OK", 4) != 0) {
+    if (!read_line(im, tmp, sizeof tmp) || strncmp(im->line, "* OK", 4) != 0) {
         snprintf(err, errlen, "bad IMAP greeting from %s", host);
-        imapclose(im);
+        imap_close(im);
         return NULL;
     }
     return im;
 }
 
-void imapquote(char *dst, size_t cap, const char *s) {
+void imap_quote(char *dst, size_t cap, const char *s) {
     size_t i = 0;
 
     if (cap < 3) {
@@ -246,7 +246,7 @@ void imapquote(char *dst, size_t cap, const char *s) {
     dst[i] = '\0';
 }
 
-int imapexec(Imap *im, Linefn fn, void *ud, char *err, size_t errlen, const char *fmt, ...) {
+int imap_execute(Imap *im, Linefn fn, void *ud, char *err, size_t errlen, const char *fmt, ...) {
     char cmd[1024], tag[16];
     va_list ap;
     size_t taglen;
@@ -255,12 +255,12 @@ int imapexec(Imap *im, Linefn fn, void *ud, char *err, size_t errlen, const char
     vsnprintf(cmd, sizeof cmd, fmt, ap);
     va_end(ap);
     taglen = (size_t)snprintf(tag, sizeof tag, "h%u", ++im->tag);
-    if (writeall(im, tag, taglen) < 0 || writeall(im, " ", 1) < 0 || writeall(im, cmd, strlen(cmd)) < 0 || writeall(im, "\r\n", 2) < 0) {
+    if (write_all(im, tag, taglen) < 0 || write_all(im, " ", 1) < 0 || write_all(im, cmd, strlen(cmd)) < 0 || write_all(im, "\r\n", 2) < 0) {
         snprintf(err, errlen, "connection lost");
         return -1;
     }
     for (;;) {
-        char *l = readline(im, err, errlen);
+        char *l = read_line(im, err, errlen);
         if (!l)
             return -1;
         if (!strncmp(l, tag, taglen) && l[taglen] == ' ') {
@@ -274,18 +274,18 @@ int imapexec(Imap *im, Linefn fn, void *ud, char *err, size_t errlen, const char
     }
 }
 
-int imaplogin(Imap *im, const char *user, const char *pass, char *err, size_t errlen) {
+int imap_login(Imap *im, const char *user, const char *pass, char *err, size_t errlen) {
     char qu[256], qp[256];
     int r;
 
-    imapquote(qu, sizeof qu, user);
-    imapquote(qp, sizeof qp, pass);
-    r = imapexec(im, NULL, NULL, err, errlen, "LOGIN %s %s", qu, qp);
+    imap_quote(qu, sizeof qu, user);
+    imap_quote(qp, sizeof qp, pass);
+    r = imap_execute(im, NULL, NULL, err, errlen, "LOGIN %s %s", qu, qp);
     memset(qp, 0, sizeof qp);
     return r;
 }
 
-unsigned imapflags(const char *s) {
+unsigned imap_parse_flags(const char *s) {
     unsigned f = 0;
 
     if (strstr(s, "\\Seen"))
@@ -303,7 +303,7 @@ unsigned imapflags(const char *s) {
     return f;
 }
 
-void imapflagstr(unsigned f, char *out, size_t cap) {
+void imap_format_flags(unsigned f, char *out, size_t cap) {
     out[0] = '\0';
     if (f & FSeen)
         strncat(out, "\\Seen ", cap - strlen(out) - 1);
@@ -327,7 +327,7 @@ typedef struct {
     int got;
 } Fetchone;
 
-static void fetchonecb(const char *l, void *ud) {
+static void on_fetch_body_line(const char *l, void *ud) {
     Fetchone *b = ud;
     char pat[24];
     const char *p, *fl;
@@ -337,17 +337,17 @@ static void fetchonecb(const char *l, void *ud) {
     if (!(p = strstr(l, pat)) || (p[plen] >= '0' && p[plen] <= '9'))
         return;
     if ((fl = strstr(l, "FLAGS (")))
-        b->flags = imapflags(fl);
+        b->flags = imap_parse_flags(fl);
     b->got = 1;
 }
 
-int imapfetchbody(Imap *im, uint32_t uid, FILE *out, unsigned *flags, char *err, size_t errlen) {
+int imap_fetch_body(Imap *im, uint32_t uid, FILE *out, unsigned *flags, char *err, size_t errlen) {
     Fetchone b = {uid, 0, 0};
     int r;
 
     im->sink = out;
     im->sinkcr = 0;
-    r = imapexec(im, fetchonecb, &b, err, errlen, "UID FETCH %u (UID FLAGS BODY.PEEK[])", uid);
+    r = imap_execute(im, on_fetch_body_line, &b, err, errlen, "UID FETCH %u (UID FLAGS BODY.PEEK[])", uid);
     if (im->sinkcr)
         fputc('\r', out); /* message ended on a bare CR */
     im->sink = NULL;
@@ -359,7 +359,7 @@ int imapfetchbody(Imap *im, uint32_t uid, FILE *out, unsigned *flags, char *err,
     return r;
 }
 
-int imapappendfile(Imap *im, const char *qbox, unsigned flags, FILE *src, char *err, size_t errlen, uint32_t *uid) {
+int imap_append_file(Imap *im, const char *qbox, unsigned flags, FILE *src, char *err, size_t errlen, uint32_t *uid) {
     char head[512], tag[16], flagstr[80], buf[8192], out[16384];
     long size = 0;
     size_t taglen, n, i, o;
@@ -373,15 +373,15 @@ int imapappendfile(Imap *im, const char *qbox, unsigned flags, FILE *src, char *
     }
     rewind(src);
 
-    imapflagstr(flags, flagstr, sizeof flagstr);
+    imap_format_flags(flags, flagstr, sizeof flagstr);
     taglen = (size_t)snprintf(tag, sizeof tag, "h%u", ++im->tag);
     snprintf(head, sizeof head, "%s APPEND %s (%s) {%ld}\r\n", tag, qbox, flagstr, size);
-    if (writeall(im, head, strlen(head)) < 0) {
+    if (write_all(im, head, strlen(head)) < 0) {
         snprintf(err, errlen, "connection lost");
         return -1;
     }
     for (;;) { /* wait for the go-ahead */
-        if (!(l = readline(im, err, errlen)))
+        if (!(l = read_line(im, err, errlen)))
             return -1;
         if (l[0] == '+')
             break;
@@ -398,17 +398,17 @@ int imapappendfile(Imap *im, const char *qbox, unsigned flags, FILE *src, char *
             out[o++] = buf[i];
             prev = buf[i];
         }
-        if (writeall(im, out, o) < 0) {
+        if (write_all(im, out, o) < 0) {
             snprintf(err, errlen, "connection lost");
             return -1;
         }
     }
-    if (writeall(im, "\r\n", 2) < 0) {
+    if (write_all(im, "\r\n", 2) < 0) {
         snprintf(err, errlen, "connection lost");
         return -1;
     }
     for (;;) {
-        if (!(l = readline(im, err, errlen)))
+        if (!(l = read_line(im, err, errlen)))
             return -1;
         if (!strncmp(l, tag, taglen) && l[taglen] == ' ') {
             const char *p;
@@ -427,7 +427,7 @@ int imapappendfile(Imap *im, const char *qbox, unsigned flags, FILE *src, char *
     }
 }
 
-void imapclose(Imap *im) {
+void imap_close(Imap *im) {
     if (!im)
         return;
     if (im->ssl) {

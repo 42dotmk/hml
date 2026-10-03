@@ -15,7 +15,7 @@
 static pthread_mutex_t seqmtx = PTHREAD_MUTEX_INITIALIZER;
 static int seq;
 
-static int nextseq(void) {
+static int next_sequence(void) {
     int s;
 
     pthread_mutex_lock(&seqmtx);
@@ -24,7 +24,7 @@ static int nextseq(void) {
     return s;
 }
 
-static const char *shorthost(void) {
+static const char *short_hostname(void) {
     static char host[64];
 
     if (!host[0]) {
@@ -40,7 +40,7 @@ static const char *shorthost(void) {
 
 /* filenames look like "1778851759.23580_1.host,U=123:2,S" - mbsync stores
  * the server uid after ,U= and maildir keeps flag letters after :2, */
-static int scanone(const char *boxdir, const char *sub, int indir, Box *box, char *err, size_t errlen) {
+static int scan_subdir(const char *boxdir, const char *sub, int indir, Box *box, char *err, size_t errlen) {
     char path[4160];
     DIR *d;
     struct dirent *e;
@@ -61,7 +61,7 @@ static int scanone(const char *boxdir, const char *sub, int indir, Box *box, cha
         if (!m.uid)
             box->nouid++;
         if (fl)
-            m.flags = letterflags(fl + 3);
+            m.flags = flags_from_letters(fl + 3);
         m.name = strdup(e->d_name);
         arrput(box->msgs, m);
     }
@@ -71,7 +71,7 @@ static int scanone(const char *boxdir, const char *sub, int indir, Box *box, cha
 
 /* create the maildir and its cur/new/tmp, parents included; 0700 like
  * mbsync, existing directories (whatever their mode) are left alone */
-int mdensure(const char *boxdir, char *err, size_t errlen) {
+int maildir_create(const char *boxdir, char *err, size_t errlen) {
     char p[4160];
     size_t i, n = strlen(boxdir);
     static const char *sub[] = {"cur", "new", "tmp"};
@@ -103,14 +103,14 @@ int mdensure(const char *boxdir, char *err, size_t errlen) {
     return 0;
 }
 
-int boxscan(const char *boxdir, Box *box, char *err, size_t errlen) {
+int maildir_scan(const char *boxdir, Box *box, char *err, size_t errlen) {
     memset(box, 0, sizeof *box);
-    if (scanone(boxdir, "cur", 0, box, err, errlen) < 0 || scanone(boxdir, "new", 1, box, err, errlen) < 0)
+    if (scan_subdir(boxdir, "cur", 0, box, err, errlen) < 0 || scan_subdir(boxdir, "new", 1, box, err, errlen) < 0)
         return -1;
     return 0;
 }
 
-void boxfree(Box *box) {
+void maildir_scan_free(Box *box) {
     ptrdiff_t i;
 
     for (i = 0; i < arrlen(box->msgs); i++)
@@ -118,19 +118,19 @@ void boxfree(Box *box) {
     arrfree(box->msgs);
 }
 
-int mdtmp(char *dst, size_t cap, const char *boxdir) {
-    snprintf(dst, cap, "%s/tmp/hml.%d.%d", boxdir, (int)getpid(), nextseq());
+int maildir_temp_path(char *dst, size_t cap, const char *boxdir) {
+    snprintf(dst, cap, "%s/tmp/hml.%d.%d", boxdir, (int)getpid(), next_sequence());
     return 0;
 }
 
 /* move a downloaded message from tmp/ into the maildir; unseen mail goes to
  * new/, everything else to cur/, matching what mbsync produces */
-int mdplace(const char *boxdir, uint32_t nuid, unsigned flags, const char *tmppath, char *err, size_t errlen) {
+int maildir_store(const char *boxdir, uint32_t nuid, unsigned flags, const char *tmppath, char *err, size_t errlen) {
     char path[4160], fl[8];
 
-    flagletters(flags, fl);
-    snprintf(path, sizeof path, "%s/%s/%ld.%d_%d.%s,U=%u:2,%s", boxdir, (flags & FSeen) ? "cur" : "new", (long)time(NULL), (int)getpid(), nextseq(),
-             shorthost(), nuid, fl);
+    flags_to_letters(flags, fl);
+    snprintf(path, sizeof path, "%s/%s/%ld.%d_%d.%s,U=%u:2,%s", boxdir, (flags & FSeen) ? "cur" : "new", (long)time(NULL), (int)getpid(), next_sequence(),
+             short_hostname(), nuid, fl);
     if (rename(tmppath, path) < 0) {
         snprintf(err, errlen, "rename into %s: %s", path, strerror(errno));
         return -1;
@@ -145,7 +145,7 @@ static size_t basename_len(const char *name) {
     return colon ? (size_t)(colon - name) : strlen(name);
 }
 
-static int mdrename(const char *boxdir, const Local *m, const char *newsub, const char *newname, char *err, size_t errlen) {
+static int maildir_rename(const char *boxdir, const Local *m, const char *newsub, const char *newname, char *err, size_t errlen) {
     char oldp[4160], newp[4160];
 
     snprintf(oldp, sizeof oldp, "%s/%s/%s", boxdir, m->indir ? "new" : "cur", m->name);
@@ -157,7 +157,7 @@ static int mdrename(const char *boxdir, const Local *m, const char *newsub, cons
     return 0;
 }
 
-int mdsetflags(const char *boxdir, const Local *m, unsigned flags, char *err, size_t errlen) {
+int maildir_set_flags(const char *boxdir, const Local *m, unsigned flags, char *err, size_t errlen) {
     char name[512], fl[8];
     size_t blen = basename_len(m->name);
     const char *sub;
@@ -166,15 +166,15 @@ int mdsetflags(const char *boxdir, const Local *m, unsigned flags, char *err, si
         snprintf(err, errlen, "filename too long: %s", m->name);
         return -1;
     }
-    flagletters(flags, fl);
+    flags_to_letters(flags, fl);
     snprintf(name, sizeof name, "%.*s:2,%s", (int)blen, m->name, fl);
     /* seen mail graduates from new/ to cur/; it never moves back */
     sub = (flags & FSeen) ? "cur" : (m->indir ? "new" : "cur");
-    return mdrename(boxdir, m, sub, name, err, errlen);
+    return maildir_rename(boxdir, m, sub, name, err, errlen);
 }
 
 /* give a locally-new message its near uid after a successful push */
-int mdassignuid(const char *boxdir, const Local *m, uint32_t nuid, char *err, size_t errlen) {
+int maildir_assign_uid(const char *boxdir, const Local *m, uint32_t nuid, char *err, size_t errlen) {
     char name[512], fl[8];
     size_t blen = basename_len(m->name);
 
@@ -182,12 +182,12 @@ int mdassignuid(const char *boxdir, const Local *m, uint32_t nuid, char *err, si
         snprintf(err, errlen, "filename too long: %s", m->name);
         return -1;
     }
-    flagletters(m->flags, fl);
+    flags_to_letters(m->flags, fl);
     snprintf(name, sizeof name, "%.*s,U=%u:2,%s", (int)blen, m->name, nuid, fl);
-    return mdrename(boxdir, m, m->indir ? "new" : "cur", name, err, errlen);
+    return maildir_rename(boxdir, m, m->indir ? "new" : "cur", name, err, errlen);
 }
 
-int mddelete(const char *boxdir, const Local *m, char *err, size_t errlen) {
+int maildir_delete(const char *boxdir, const Local *m, char *err, size_t errlen) {
     char path[4160];
 
     snprintf(path, sizeof path, "%s/%s/%s", boxdir, m->indir ? "new" : "cur", m->name);
@@ -198,10 +198,10 @@ int mddelete(const char *boxdir, const Local *m, char *err, size_t errlen) {
     return 0;
 }
 
-int mddeliver(const char *boxdir, const char *tmppath, char *err, size_t errlen) {
+int maildir_deliver(const char *boxdir, const char *tmppath, char *err, size_t errlen) {
     char path[4160];
 
-    snprintf(path, sizeof path, "%s/new/%ld.%d_%d.%s:2,", boxdir, (long)time(NULL), (int)getpid(), nextseq(), shorthost());
+    snprintf(path, sizeof path, "%s/new/%ld.%d_%d.%s:2,", boxdir, (long)time(NULL), (int)getpid(), next_sequence(), short_hostname());
     if (rename(tmppath, path) < 0) {
         snprintf(err, errlen, "rename into %s: %s", path, strerror(errno));
         return -1;

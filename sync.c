@@ -59,7 +59,7 @@ typedef struct { /* near-side flag change to apply by rename */
     unsigned flags;
 } Nact;
 
-static void addf(char *d, size_t cap, const char *fmt, ...) {
+static void append_format(char *d, size_t cap, const char *fmt, ...) {
     size_t len = strlen(d);
     va_list ap;
 
@@ -74,7 +74,7 @@ static void addf(char *d, size_t cap, const char *fmt, ...) {
 }
 
 /* same lock mbsync takes, so the two can never run on a folder at once */
-static int lockstate(const char *boxdir) {
+static int lock_sync_state(const char *boxdir) {
     char path[4160];
     struct flock fl;
     int fd;
@@ -92,7 +92,7 @@ static int lockstate(const char *boxdir) {
     return fd;
 }
 
-static void selcb(const char *l, void *ud) {
+static void on_select_line(const char *l, void *ud) {
     Sel *s = ud;
     uint32_t u;
     uint64_t m;
@@ -109,18 +109,18 @@ static void selcb(const char *l, void *ud) {
 }
 
 /* "* n FETCH (UID u FLAGS (...))" -> map uid to flags */
-static void mapcb(const char *l, void *ud) {
+static void on_fetch_flags_line(const char *l, void *ud) {
     Uidmap **m = ud;
     const char *u, *fl;
 
     if (!strstr(l, " FETCH ") || !(u = strstr(l, "UID ")))
         return;
     fl = strstr(l, "FLAGS (");
-    hmput(*m, (uint32_t)strtoul(u + 4, NULL, 10), fl ? imapflags(fl) : 0);
+    hmput(*m, (uint32_t)strtoul(u + 4, NULL, 10), fl ? imap_parse_flags(fl) : 0);
 }
 
 /* "* SEARCH n n n" -> set of uids */
-static void setcb(const char *l, void *ud) {
+static void on_search_line(const char *l, void *ud) {
     Uidmap **m = ud;
     const char *p;
     char *end;
@@ -141,7 +141,7 @@ typedef struct {
     long ghostnew; /* already \Deleted on arrival: a ghost, not new mail */
 } NewCtx;
 
-static void newcb(const char *l, void *ud) {
+static void on_new_message_line(const char *l, void *ud) {
     NewCtx *c = ud;
     const char *u, *fl;
     uint32_t uid;
@@ -153,7 +153,7 @@ static void newcb(const char *l, void *ud) {
     if (uid <= c->min) /* the n:* quirk echoes the last message back */
         return;
     fl = strstr(l, "FLAGS (");
-    f = fl ? imapflags(fl) : 0;
+    f = fl ? imap_parse_flags(fl) : 0;
     if (f & FDeleted) {
         c->ghostnew++;
     } else {
@@ -164,7 +164,7 @@ static void newcb(const char *l, void *ud) {
     }
 }
 
-static int cacheload(const char *boxdir, Cache *c) {
+static int cache_load(const char *boxdir, Cache *c) {
     char path[4160], line[128];
     FILE *f;
     int ver = 0;
@@ -189,7 +189,7 @@ static int cacheload(const char *boxdir, Cache *c) {
     return 0;
 }
 
-static void cachesave(const char *boxdir, const Cache *c) {
+static void cache_save(const char *boxdir, const Cache *c) {
     char tmp[4160], path[4160];
     FILE *f;
 
@@ -206,7 +206,7 @@ static void cachesave(const char *boxdir, const Cache *c) {
     rename(tmp, path);
 }
 
-static void statmtimes(const char *boxdir, Cache *c) {
+static void stat_directory_mtimes(const char *boxdir, Cache *c) {
     char path[4160];
     struct stat sb;
 
@@ -223,7 +223,7 @@ static void statmtimes(const char *boxdir, Cache *c) {
 }
 
 /* build a comma-separated uid list; advances *i, returns how many fit */
-static int uidstr(char *dst, size_t cap, const uint32_t *uids, long n, long *i) {
+static int format_uid_list(char *dst, size_t cap, const uint32_t *uids, long n, long *i) {
     int cnt = 0, l;
     size_t len = 0;
 
@@ -242,7 +242,7 @@ static int uidstr(char *dst, size_t cap, const uint32_t *uids, long n, long *i) 
 }
 
 /* group identical flag deltas and STORE them in batched commands */
-static int storeflags(Imap *im, Fact *facts, int rem, char *err, size_t errlen) {
+static int store_flags(Imap *im, Fact *facts, int rem, char *err, size_t errlen) {
     long i, j, k;
 
     for (i = 0; i < arrlen(facts); i++) {
@@ -261,12 +261,12 @@ static int storeflags(Imap *im, Fact *facts, int rem, char *err, size_t errlen) 
                     facts[j].add = 0;
             }
         }
-        imapflagstr(m, fs, sizeof fs);
+        imap_format_flags(m, fs, sizeof fs);
         k = 0;
         while (k < arrlen(uids)) {
-            if (!uidstr(list, sizeof list, uids, arrlen(uids), &k))
+            if (!format_uid_list(list, sizeof list, uids, arrlen(uids), &k))
                 break;
-            if (imapexec(im, NULL, NULL, err, errlen, "UID STORE %s %cFLAGS.SILENT (%s)", list, rem ? '-' : '+', fs) < 0) {
+            if (imap_execute(im, NULL, NULL, err, errlen, "UID STORE %s %cFLAGS.SILENT (%s)", list, rem ? '-' : '+', fs) < 0) {
                 arrfree(uids);
                 return -1;
             }
@@ -276,7 +276,7 @@ static int storeflags(Imap *im, Fact *facts, int rem, char *err, size_t errlen) 
     return 0;
 }
 
-int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) {
+int sync_box(Imap *im, const Account *a, const Channel *ch, int mode, int force) {
     char boxdir[4096], root[2048], label[64], qfar[256], err[256], jpath[4160];
     char d[512] = "";
     State st;
@@ -299,14 +299,14 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
     memset(&st, 0, sizeof st);
     memset(&box, 0, sizeof box);
     snprintf(label, sizeof label, "%s/%s", a->name, ch->near);
-    expand(a->maildir, root, sizeof root);
+    expand_home(a->maildir, root, sizeof root);
     snprintf(boxdir, sizeof boxdir, "%s/%s", root, ch->near);
-    imapquote(qfar, sizeof qfar, ch->far);
+    imap_quote(qfar, sizeof qfar, ch->far);
 
     /* from scratch: recv bootstraps the maildir tree, then the empty state
      * below makes everything on the server "new" - a full clone */
     if (mode == MSync) {
-        if (mdensure(boxdir, err, sizeof err) < 0) {
+        if (maildir_create(boxdir, err, sizeof err) < 0) {
             report(label, "error: %s", err);
             return 2;
         }
@@ -320,7 +320,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
         }
     }
 
-    if ((lfd = lockstate(boxdir)) == -2) {
+    if ((lfd = lock_sync_state(boxdir)) == -2) {
         report(label, "locked (mbsync running?), skipped");
         return 1;
     }
@@ -337,7 +337,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
         return 2;
     }
 
-    if (stateload(boxdir, &st, err, sizeof err) < 0 || uvload(boxdir, &uvval, &uvlast, err, sizeof err) < 0) {
+    if (sync_state_load(boxdir, &st, err, sizeof err) < 0 || uidvalidity_load(boxdir, &uvval, &uvlast, err, sizeof err) < 0) {
         report(label, "error: %s", err);
         close(lfd);
         return 2;
@@ -347,41 +347,41 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
         close(lfd);
         return 2;
     }
-    cacheload(boxdir, &cache);
+    cache_load(boxdir, &cache);
     if (force)
         cache.valid = 0;
 
     memset(&sel, 0, sizeof sel);
-    if (imapexec(im, selcb, &sel, err, sizeof err, "%s %s (CONDSTORE)", mode == MSync ? "SELECT" : "EXAMINE", qfar) < 0 &&
-        imapexec(im, selcb, &sel, err, sizeof err, "%s %s", mode == MSync ? "SELECT" : "EXAMINE", qfar) < 0) {
+    if (imap_execute(im, on_select_line, &sel, err, sizeof err, "%s %s (CONDSTORE)", mode == MSync ? "SELECT" : "EXAMINE", qfar) < 0 &&
+        imap_execute(im, on_select_line, &sel, err, sizeof err, "%s %s", mode == MSync ? "SELECT" : "EXAMINE", qfar) < 0) {
         report(label, "error: cannot open mailbox: %s", err);
         close(lfd);
-        statefree(&st);
+        sync_state_free(&st);
         return 2;
     }
     if (st.present && st.fuidval && sel.uidvalidity != st.fuidval) {
         report(label, "UIDVALIDITY MISMATCH (state %u, server %u), refusing", st.fuidval, sel.uidvalidity);
         close(lfd);
-        statefree(&st);
+        sync_state_free(&st);
         return 2;
     }
     if (cache.valid && cache.uidval != sel.uidvalidity)
         cache.valid = 0;
 
     /* fast path: server counters and local mtimes both untouched */
-    statmtimes(boxdir, &ncache);
+    stat_directory_mtimes(boxdir, &ncache);
     if (cache.valid && sel.uidnext == cache.uidnext && sel.exists == cache.exists && sel.modseq == cache.modseq && ncache.curs == cache.curs &&
         ncache.curn == cache.curn && ncache.news == cache.news && ncache.newn == cache.newn) {
         report(label, "remote %6u  local %6ld  in sync (fast)", sel.exists, cache.nlocal);
         close(lfd);
-        statefree(&st);
+        sync_state_free(&st);
         return 0;
     }
 
-    if (boxscan(boxdir, &box, err, sizeof err) < 0) {
+    if (maildir_scan(boxdir, &box, err, sizeof err) < 0) {
         report(label, "error: %s", err);
         close(lfd);
-        statefree(&st);
+        sync_state_free(&st);
         return 2;
     }
     scanned = 1;
@@ -412,7 +412,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
     /* far side: new messages first */
     if (sel.exists && (!st.present || sel.uidnext > st.maxpulled + 1)) {
         NewCtx nc = {st.maxpulled, NULL, 0};
-        if (imapexec(im, newcb, &nc, err, sizeof err, "UID FETCH %u:* (UID FLAGS)", st.maxpulled + 1) < 0) {
+        if (imap_execute(im, on_new_message_line, &nc, err, sizeof err, "UID FETCH %u:* (UID FLAGS)", st.maxpulled + 1) < 0) {
             report(label, "error: FETCH new: %s", err);
             rc = 2;
             goto out;
@@ -424,7 +424,8 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
     /* far side: flag changes and vanished messages */
     if (st.present && st.maxpulled && sel.exists) {
         if (cache.valid && cache.modseq && sel.modseq && sel.modseq != cache.modseq) {
-            if (imapexec(im, mapcb, &farflags, err, sizeof err, "UID FETCH 1:%u (UID FLAGS) (CHANGEDSINCE %" PRIu64 ")", st.maxpulled, cache.modseq) < 0) {
+            if (imap_execute(im, on_fetch_flags_line, &farflags, err, sizeof err, "UID FETCH 1:%u (UID FLAGS) (CHANGEDSINCE %" PRIu64 ")", st.maxpulled,
+                             cache.modseq) < 0) {
                 report(label, "error: FETCH changed: %s", err);
                 rc = 2;
                 goto out;
@@ -432,7 +433,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
         } else if (!cache.valid) {
             /* no baseline yet: one full listing, exactly what mbsync does on
              * every run - hml pays it once and caches */
-            if (imapexec(im, mapcb, &farflags, err, sizeof err, "UID FETCH 1:%u (UID FLAGS)", st.maxpulled) < 0) {
+            if (imap_execute(im, on_fetch_flags_line, &farflags, err, sizeof err, "UID FETCH 1:%u (UID FLAGS)", st.maxpulled) < 0) {
                 report(label, "error: FETCH all: %s", err);
                 rc = 2;
                 goto out;
@@ -459,7 +460,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
             /* counts disagree: recount the \Deleted ghosts, and if that still
              * does not explain it, list the mailbox to find what vanished */
             Uidmap *delset = NULL;
-            if (imapexec(im, setcb, &delset, err, sizeof err, "UID SEARCH DELETED") < 0) {
+            if (imap_execute(im, on_search_line, &delset, err, sizeof err, "UID SEARCH DELETED") < 0) {
                 report(label, "error: SEARCH: %s", err);
                 rc = 2;
                 goto out;
@@ -473,7 +474,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
             if ((long)sel.exists != expected) {
                 Uidmap *server = NULL;
                 long van = 0;
-                if (imapexec(im, setcb, &server, err, sizeof err, "UID SEARCH ALL") < 0) {
+                if (imap_execute(im, on_search_line, &server, err, sizeof err, "UID SEARCH ALL") < 0) {
                     report(label, "error: SEARCH: %s", err);
                     rc = 2;
                     goto out;
@@ -601,7 +602,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
                 report(label, "would store flags on remote uid %u", facts[i].uid);
             for (i = 0; i < arrlen(nacts) && dryn < DRYMAX; i++, dryn++) {
                 char fl[8];
-                flagletters(nacts[i].flags, fl);
+                flags_to_letters(nacts[i].flags, fl);
                 report(label, "would set flags [%s] on %s", fl, box.msgs[nacts[i].idx].name);
             }
             for (i = 0; i < arrlen(ndel) && dryn < DRYMAX; i++, dryn++)
@@ -618,7 +619,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
             /* reserve near uids up front so a crash can never reuse one */
             if (arrlen(news) + arrlen(pushi) > 0) {
                 uvlast += (uint32_t)(arrlen(news) + arrlen(pushi));
-                if (uvwrite(boxdir, uvval, uvlast, err, sizeof err) < 0) {
+                if (uidvalidity_write(boxdir, uvval, uvlast, err, sizeof err) < 0) {
                     report(label, "error: %s", err);
                     rc = 2;
                     goto finish;
@@ -629,13 +630,13 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
                 FILE *f;
                 unsigned pf;
                 Pair np;
-                mdtmp(tmp, sizeof tmp, boxdir);
+                maildir_temp_path(tmp, sizeof tmp, boxdir);
                 if (!(f = fopen(tmp, "w"))) {
                     report(label, "error: cannot create %s", tmp);
                     rc = 2;
                     goto finish;
                 }
-                if (imapfetchbody(im, news[i].uid, f, &pf, err, sizeof err) < 0) {
+                if (imap_fetch_body(im, news[i].uid, f, &pf, err, sizeof err) < 0) {
                     fclose(f);
                     unlink(tmp);
                     report(label, "error: pull uid %u: %s", news[i].uid, err);
@@ -651,7 +652,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
                     continue;
                 }
                 nextuid++;
-                if (mdplace(boxdir, nextuid, pf, tmp, err, sizeof err) < 0) {
+                if (maildir_store(boxdir, nextuid, pf, tmp, err, sizeof err) < 0) {
                     report(label, "error: %s", err);
                     rc = 2;
                     goto finish;
@@ -667,7 +668,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
                     st.maxpushed = nextuid;
                 mutated = 1;
                 npulled++;
-                if (++batch % BATCH == 0 && statewrite(boxdir, &st, err, sizeof err) < 0) {
+                if (++batch % BATCH == 0 && sync_state_write(boxdir, &st, err, sizeof err) < 0) {
                     report(label, "error: %s", err);
                     rc = 2;
                     goto finish;
@@ -685,7 +686,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
                     rc = 2;
                     goto finish;
                 }
-                if (imapappendfile(im, qfar, m->flags & SYNCFLAGS, f, err, sizeof err, &newfuid) < 0) {
+                if (imap_append_file(im, qfar, m->flags & SYNCFLAGS, f, err, sizeof err, &newfuid) < 0) {
                     fclose(f);
                     report(label, "error: push %s: %s", m->name, err);
                     rc = 2;
@@ -693,7 +694,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
                 }
                 fclose(f);
                 nextuid++;
-                if (mdassignuid(boxdir, m, nextuid, err, sizeof err) < 0) {
+                if (maildir_assign_uid(boxdir, m, nextuid, err, sizeof err) < 0) {
                     report(label, "error: %s", err);
                     rc = 2;
                     goto finish;
@@ -709,14 +710,14 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
                     st.maxpushed = nextuid;
                 mutated = 1;
                 npushed++;
-                if (++batch % BATCH == 0 && statewrite(boxdir, &st, err, sizeof err) < 0) {
+                if (++batch % BATCH == 0 && sync_state_write(boxdir, &st, err, sizeof err) < 0) {
                     report(label, "error: %s", err);
                     rc = 2;
                     goto finish;
                 }
             }
             if (arrlen(facts)) {
-                if (storeflags(im, facts, 0, err, sizeof err) < 0 || storeflags(im, facts, 1, err, sizeof err) < 0) {
+                if (store_flags(im, facts, 0, err, sizeof err) < 0 || store_flags(im, facts, 1, err, sizeof err) < 0) {
                     report(label, "error: STORE: %s", err);
                     rc = 2;
                     goto finish;
@@ -724,7 +725,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
                 mutated = 1;
             }
             for (i = 0; i < arrlen(nacts); i++) {
-                if (mdsetflags(boxdir, &box.msgs[nacts[i].idx], nacts[i].flags, err, sizeof err) < 0) {
+                if (maildir_set_flags(boxdir, &box.msgs[nacts[i].idx], nacts[i].flags, err, sizeof err) < 0) {
                     report(label, "error: %s", err);
                     rc = 2;
                     goto finish;
@@ -732,7 +733,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
                 mutated = 1;
             }
             for (i = 0; i < arrlen(ndel); i++) {
-                if (mddelete(boxdir, &box.msgs[ndel[i]], err, sizeof err) < 0) {
+                if (maildir_delete(boxdir, &box.msgs[ndel[i]], err, sizeof err) < 0) {
                     report(label, "error: %s", err);
                     rc = 2;
                     goto finish;
@@ -743,9 +744,9 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
                 long k = 0;
                 char list[720];
                 while (k < arrlen(expu)) {
-                    if (!uidstr(list, sizeof list, expu, arrlen(expu), &k))
+                    if (!format_uid_list(list, sizeof list, expu, arrlen(expu), &k))
                         break;
-                    if (imapexec(im, NULL, NULL, err, sizeof err, "UID EXPUNGE %s", list) < 0) {
+                    if (imap_execute(im, NULL, NULL, err, sizeof err, "UID EXPUNGE %s", list) < 0) {
                         report(label, "error: EXPUNGE: %s", err);
                         rc = 2;
                         goto finish;
@@ -755,7 +756,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
                 mutated = 1;
             }
         finish:
-            if ((mutated || stchanged) && statewrite(boxdir, &st, err, sizeof err) < 0) {
+            if ((mutated || stchanged) && sync_state_write(boxdir, &st, err, sizeof err) < 0) {
                 report(label, "error: %s", err);
                 rc = 2;
             }
@@ -764,49 +765,49 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
         /* compose the per-folder report */
         if (mode == MSync && (acts || stchanged) && rc == 0) {
             if (npulled)
-                addf(d, sizeof d, "pulled %ld", npulled);
+                append_format(d, sizeof d, "pulled %ld", npulled);
             if (npushed)
-                addf(d, sizeof d, "pushed %ld", npushed);
+                append_format(d, sizeof d, "pushed %ld", npushed);
             if (arrlen(facts))
-                addf(d, sizeof d, "%ld flag updates remote", (long)arrlen(facts));
+                append_format(d, sizeof d, "%ld flag updates remote", (long)arrlen(facts));
             if (arrlen(nacts))
-                addf(d, sizeof d, "%ld flag updates local", (long)arrlen(nacts));
+                append_format(d, sizeof d, "%ld flag updates local", (long)arrlen(nacts));
             if (arrlen(ndel))
-                addf(d, sizeof d, "deleted %ld local", (long)arrlen(ndel));
+                append_format(d, sizeof d, "deleted %ld local", (long)arrlen(ndel));
             if (arrlen(expu))
-                addf(d, sizeof d, "expunged %ld remote", (long)arrlen(expu));
+                append_format(d, sizeof d, "expunged %ld remote", (long)arrlen(expu));
             if (vgone && !arrlen(ndel))
-                addf(d, sizeof d, "recorded %ld gone remote", vgone);
+                append_format(d, sizeof d, "recorded %ld gone remote", vgone);
             if (lgone && !arrlen(expu))
-                addf(d, sizeof d, "recorded %ld gone local", lgone);
+                append_format(d, sizeof d, "recorded %ld gone local", lgone);
         } else if (rc == 0) {
             if (arrlen(news))
-                addf(d, sizeof d, "%ld to pull", (long)arrlen(news));
+                append_format(d, sizeof d, "%ld to pull", (long)arrlen(news));
             if (arrlen(pushi))
-                addf(d, sizeof d, "%ld to push", (long)arrlen(pushi));
+                append_format(d, sizeof d, "%ld to push", (long)arrlen(pushi));
             if (arrlen(facts))
-                addf(d, sizeof d, "%ld flag updates for remote", (long)arrlen(facts));
+                append_format(d, sizeof d, "%ld flag updates for remote", (long)arrlen(facts));
             if (arrlen(nacts))
-                addf(d, sizeof d, "%ld flag updates for local", (long)arrlen(nacts));
+                append_format(d, sizeof d, "%ld flag updates for local", (long)arrlen(nacts));
             if (vgone)
-                addf(d, sizeof d, "%ld gone remote", vgone);
+                append_format(d, sizeof d, "%ld gone remote", vgone);
             if (lgone)
-                addf(d, sizeof d, "%ld gone local", lgone);
+                append_format(d, sizeof d, "%ld gone local", lgone);
         }
         if (untracked)
-            addf(d, sizeof d, "%ld local untracked (skipped)", untracked);
+            append_format(d, sizeof d, "%ld local untracked (skipped)", untracked);
         if (remuntracked)
-            addf(d, sizeof d, "%ld remote untracked (skipped)", remuntracked);
+            append_format(d, sizeof d, "%ld remote untracked (skipped)", remuntracked);
         if (tdrift)
-            addf(d, sizeof d, "%ld trashed, kept (no expunge here)", tdrift);
+            append_format(d, sizeof d, "%ld trashed, kept (no expunge here)", tdrift);
         if (!st.present)
-            addf(d, sizeof d, "no sync state");
+            append_format(d, sizeof d, "no sync state");
         if (journal)
-            addf(d, sizeof d, "mbsync journal present");
+            append_format(d, sizeof d, "mbsync journal present");
         if (!d[0])
             snprintf(d, sizeof d, cache.valid ? "in sync" : "in sync (verified)");
         if (ghostsnow)
-            addf(d, sizeof d, "%ld ghost-deleted remote", ghostsnow);
+            append_format(d, sizeof d, "%ld ghost-deleted remote", ghostsnow);
         report(label, "remote %6u  local %6td  %s", sel.exists, arrlen(box.msgs), d);
 
         if (rc == 0 && (acts || vgone || lgone) && mode != MSync)
@@ -826,8 +827,8 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force) 
             ncache.modseq = sel.modseq;
             ncache.ghosts = ghostsnow;
             ncache.nlocal = arrlen(box.msgs) + npulled - arrlen(ndel);
-            statmtimes(boxdir, &ncache);
-            cachesave(boxdir, &ncache);
+            stat_directory_mtimes(boxdir, &ncache);
+            cache_save(boxdir, &ncache);
         }
     }
 
@@ -844,8 +845,8 @@ out:
     arrfree(pushi);
     arrfree(expu);
     if (scanned)
-        boxfree(&box);
-    statefree(&st);
+        maildir_scan_free(&box);
+    sync_state_free(&st);
     close(lfd); /* releases the lock */
     return rc;
 }
