@@ -98,10 +98,8 @@ unsigned letterflags(const char *s);     /* "RS", "PS", ... -> bitmask */
 void flagletters(unsigned f, char *out); /* bitmask -> "DFPRST" subset, >=8b */
 
 /* .uidvalidity: near-side uid validity + last assigned near uid */
-int uvload(const char *boxdir, uint32_t *uidval, uint32_t *lastuid, char *err,
-           size_t errlen);
-int uvwrite(const char *boxdir, uint32_t uidval, uint32_t lastuid, char *err,
-            size_t errlen);
+int uvload(const char *boxdir, uint32_t *uidval, uint32_t *lastuid, char *err, size_t errlen);
+int uvwrite(const char *boxdir, uint32_t uidval, uint32_t lastuid, char *err, size_t errlen);
 
 /* maildir.c */
 typedef struct {
@@ -118,43 +116,33 @@ typedef struct {
 
 int boxscan(const char *boxdir, Box *box, char *err, size_t errlen);
 void boxfree(Box *box);
-int mdensure(const char *boxdir, char *err,
-             size_t errlen); /* mkdir -p + cur/new/tmp */
+int mdensure(const char *boxdir, char *err, size_t errlen); /* mkdir -p + cur/new/tmp */
 int mdtmp(char *dst, size_t cap, const char *boxdir);
-int mdplace(const char *boxdir, uint32_t nuid, unsigned flags,
-            const char *tmppath, char *err, size_t errlen);
-int mdsetflags(const char *boxdir, const Local *m, unsigned flags, char *err,
-               size_t errlen);
-int mdassignuid(const char *boxdir, const Local *m, uint32_t nuid, char *err,
-                size_t errlen);
+int mdplace(const char *boxdir, uint32_t nuid, unsigned flags, const char *tmppath, char *err, size_t errlen);
+int mdsetflags(const char *boxdir, const Local *m, unsigned flags, char *err, size_t errlen);
+int mdassignuid(const char *boxdir, const Local *m, uint32_t nuid, char *err, size_t errlen);
 int mddelete(const char *boxdir, const Local *m, char *err, size_t errlen);
 /* a locally delivered message: tmp/ -> new/, no uid, no flags */
-int mddeliver(const char *boxdir, const char *tmppath, char *err,
-              size_t errlen);
+int mddeliver(const char *boxdir, const char *tmppath, char *err, size_t errlen);
 
 /* imap.c */
 typedef struct Imap Imap;
 typedef void (*Linefn)(const char *line, void *ud);
 
-Imap *tlsconnect(const char *host, int port, char *err,
-                 size_t errlen); /* bare TLS conn, no greeting expected */
-char *imapline(Imap *im, char *err, size_t errlen); /* one logical line */
+Imap *tlsconnect(const char *host, int port, char *err, size_t errlen); /* bare TLS conn, no greeting expected */
+char *imapline(Imap *im, char *err, size_t errlen);                     /* one logical line */
 int imapwrite(Imap *im, const char *s, size_t n);
 Imap *imapconnect(const char *host, int port, char *err, size_t errlen);
-int imaplogin(Imap *im, const char *user, const char *pass, char *err,
-              size_t errlen);
+int imaplogin(Imap *im, const char *user, const char *pass, char *err, size_t errlen);
 /* send one command, feed every untagged reply line to fn, 0 on tagged OK */
-int imapexec(Imap *im, Linefn fn, void *ud, char *err, size_t errlen,
-             const char *fmt, ...);
+int imapexec(Imap *im, Linefn fn, void *ud, char *err, size_t errlen, const char *fmt, ...);
 /* download one message body into out (CRLF converted to LF) */
-int imapfetchbody(Imap *im, uint32_t uid, FILE *out, unsigned *flags, char *err,
-                  size_t errlen);
+int imapfetchbody(Imap *im, uint32_t uid, FILE *out, unsigned *flags, char *err, size_t errlen);
 /* upload src (LF converted to CRLF); returns the new uid via APPENDUID */
-int imapappendfile(Imap *im, const char *qbox, unsigned flags, FILE *src,
-                   char *err, size_t errlen, uint32_t *uid);
+int imapappendfile(Imap *im, const char *qbox, unsigned flags, FILE *src, char *err, size_t errlen, uint32_t *uid);
 void imapclose(Imap *im);
 void imapquote(char *dst, size_t cap, const char *s);
-unsigned imapflags(const char *s); /* "(\Seen ...)" -> bitmask */
+unsigned imapflags(const char *s);                   /* "(\Seen ...)" -> bitmask */
 void imapflagstr(unsigned f, char *out, size_t cap); /* -> "\Seen \Deleted" */
 
 /* sync.c - the engine behind all three modes */
@@ -164,8 +152,7 @@ int syncbox(Imap *im, const Account *a, const Channel *ch, int mode, int force);
 int sendmain(int argc, char **argv);
 /* one SMTP session through the account: the message as given (Bcc
  * already stripped), CRLF and dot-stuffing added on the wire */
-int smtpsubmit(const Account *a, const char *envfrom, char **rcpts,
-               const char *msg, size_t n, char *err, size_t errlen);
+int smtpsubmit(const Account *a, const char *envfrom, char **rcpts, const char *msg, size_t n, char *err, size_t errlen);
 
 /* mime.c - the searchable text of one RFC 822 message, and the header/
  * MIME primitives show.c builds on */
@@ -180,7 +167,7 @@ typedef struct {
 size_t mimehdrs(const char *s, size_t n, Hdr **out);
 /* first header of that name, unfolded and trimmed, malloc'd; NULL if absent */
 char *mimehget(Hdr *h, const char *name);
-char *mimedecode(const char *v); /* RFC 2047 words -> UTF-8, malloc'd */
+char *mimedecode(const char *v);                         /* RFC 2047 words -> UTF-8, malloc'd */
 void mimetype(const char *ct, char *out, size_t cap);    /* "type/sub" lc */
 char *mimeparam(const char *v, const char *name);        /* ;name= value */
 char *mimecte(const char *cte, const char *s, size_t n); /* stb array */
@@ -226,8 +213,7 @@ void gwinbound(sqlite3 *db); /* after the rules, before COMMIT */
 /* a message to the gateway address: sent on to the outside party it
  * answers; 1 sent, 0 not for outside, -1 failed (err) */
 int gwoutbound(const char *msg, size_t n, char *err, size_t errlen);
-int gwlogadd(const char *mid, const char *local, const char *remote,
-             const char *account, const char *intent);
+int gwlogadd(const char *mid, const char *local, const char *remote, const char *account, const char *intent);
 char *gwid(const char *v); /* the id inside <...>, malloc'd */
 
 /* query.c - notmuch-style query -> SQL; "hml search", "hml count",
@@ -240,16 +226,14 @@ typedef struct {
 
 int querycompile(const char *q, Query *c, char **err);
 /* prepare fmt with the expression spliced in at "%s", params bound */
-sqlite3_stmt *queryprep(sqlite3 *db, const char *fmt, const Query *c,
-                        const char *tail, char **err);
+sqlite3_stmt *queryprep(sqlite3 *db, const char *fmt, const Query *c, const char *tail, char **err);
 void queryfree(Query *c);
 int searchmain(int argc, char **argv);
 int countmain(int argc, char **argv);
 int tagsmain(int argc, char **argv);
 int addressmain(int argc, char **argv);
 /* box "acct/Sub" + sub + name -> absolute path; 0 if the account is gone */
-int filepath(const char *box, const char *sub, const char *name, char *out,
-             size_t cap);
+int filepath(const char *box, const char *sub, const char *name, char *out, size_t cap);
 void dispname(const char *from, char *out, size_t cap);
 void reldate(long t, char *out, size_t cap);
 

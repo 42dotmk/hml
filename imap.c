@@ -205,15 +205,12 @@ Imap *tlsconnect(const char *host, int port, char *err, size_t errlen) {
     return im;
 
 tlsfail:
-    snprintf(err, errlen, "TLS to %s failed: %s", host,
-             ERR_reason_error_string(ERR_get_error()));
+    snprintf(err, errlen, "TLS to %s failed: %s", host, ERR_reason_error_string(ERR_get_error()));
     imapclose(im);
     return NULL;
 }
 
-char *imapline(Imap *im, char *err, size_t errlen) {
-    return readline(im, err, errlen);
-}
+char *imapline(Imap *im, char *err, size_t errlen) { return readline(im, err, errlen); }
 
 int imapwrite(Imap *im, const char *s, size_t n) { return writeall(im, s, n); }
 
@@ -249,8 +246,7 @@ void imapquote(char *dst, size_t cap, const char *s) {
     dst[i] = '\0';
 }
 
-int imapexec(Imap *im, Linefn fn, void *ud, char *err, size_t errlen,
-             const char *fmt, ...) {
+int imapexec(Imap *im, Linefn fn, void *ud, char *err, size_t errlen, const char *fmt, ...) {
     char cmd[1024], tag[16];
     va_list ap;
     size_t taglen;
@@ -259,8 +255,7 @@ int imapexec(Imap *im, Linefn fn, void *ud, char *err, size_t errlen,
     vsnprintf(cmd, sizeof cmd, fmt, ap);
     va_end(ap);
     taglen = (size_t)snprintf(tag, sizeof tag, "h%u", ++im->tag);
-    if (writeall(im, tag, taglen) < 0 || writeall(im, " ", 1) < 0 ||
-        writeall(im, cmd, strlen(cmd)) < 0 || writeall(im, "\r\n", 2) < 0) {
+    if (writeall(im, tag, taglen) < 0 || writeall(im, " ", 1) < 0 || writeall(im, cmd, strlen(cmd)) < 0 || writeall(im, "\r\n", 2) < 0) {
         snprintf(err, errlen, "connection lost");
         return -1;
     }
@@ -279,8 +274,7 @@ int imapexec(Imap *im, Linefn fn, void *ud, char *err, size_t errlen,
     }
 }
 
-int imaplogin(Imap *im, const char *user, const char *pass, char *err,
-              size_t errlen) {
+int imaplogin(Imap *im, const char *user, const char *pass, char *err, size_t errlen) {
     char qu[256], qp[256];
     int r;
 
@@ -347,15 +341,13 @@ static void fetchonecb(const char *l, void *ud) {
     b->got = 1;
 }
 
-int imapfetchbody(Imap *im, uint32_t uid, FILE *out, unsigned *flags, char *err,
-                  size_t errlen) {
+int imapfetchbody(Imap *im, uint32_t uid, FILE *out, unsigned *flags, char *err, size_t errlen) {
     Fetchone b = {uid, 0, 0};
     int r;
 
     im->sink = out;
     im->sinkcr = 0;
-    r = imapexec(im, fetchonecb, &b, err, errlen,
-                 "UID FETCH %u (UID FLAGS BODY.PEEK[])", uid);
+    r = imapexec(im, fetchonecb, &b, err, errlen, "UID FETCH %u (UID FLAGS BODY.PEEK[])", uid);
     if (im->sinkcr)
         fputc('\r', out); /* message ended on a bare CR */
     im->sink = NULL;
@@ -367,8 +359,7 @@ int imapfetchbody(Imap *im, uint32_t uid, FILE *out, unsigned *flags, char *err,
     return r;
 }
 
-int imapappendfile(Imap *im, const char *qbox, unsigned flags, FILE *src,
-                   char *err, size_t errlen, uint32_t *uid) {
+int imapappendfile(Imap *im, const char *qbox, unsigned flags, FILE *src, char *err, size_t errlen, uint32_t *uid) {
     char head[512], tag[16], flagstr[80], buf[8192], out[16384];
     long size = 0;
     size_t taglen, n, i, o;
@@ -384,8 +375,7 @@ int imapappendfile(Imap *im, const char *qbox, unsigned flags, FILE *src,
 
     imapflagstr(flags, flagstr, sizeof flagstr);
     taglen = (size_t)snprintf(tag, sizeof tag, "h%u", ++im->tag);
-    snprintf(head, sizeof head, "%s APPEND %s (%s) {%ld}\r\n", tag, qbox,
-             flagstr, size);
+    snprintf(head, sizeof head, "%s APPEND %s (%s) {%ld}\r\n", tag, qbox, flagstr, size);
     if (writeall(im, head, strlen(head)) < 0) {
         snprintf(err, errlen, "connection lost");
         return -1;
@@ -427,8 +417,7 @@ int imapappendfile(Imap *im, const char *qbox, unsigned flags, FILE *src,
                 return -1;
             }
             uint32_t uv, u;
-            if (!(p = strstr(l, "APPENDUID")) ||
-                sscanf(p, "APPENDUID %u %u", &uv, &u) != 2) {
+            if (!(p = strstr(l, "APPENDUID")) || sscanf(p, "APPENDUID %u %u", &uv, &u) != 2) {
                 snprintf(err, errlen, "no APPENDUID in append reply");
                 return -1;
             }

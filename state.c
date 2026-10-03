@@ -103,8 +103,7 @@ int stateload(const char *boxdir, State *st, char *err, size_t errlen) {
 
 /* atomic replace: write a temp file, fsync, rename over the original, so a
  * crash can never leave a truncated state for mbsync or hml to trip on */
-static int replacefile(const char *tmp, const char *path, FILE *f, char *err,
-                       size_t errlen) {
+static int replacefile(const char *tmp, const char *path, FILE *f, char *err, size_t errlen) {
     if (fflush(f) || fsync(fileno(f)) < 0 || ferror(f)) {
         snprintf(err, errlen, "write error on %s: %s", tmp, strerror(errno));
         fclose(f);
@@ -145,8 +144,7 @@ int statewrite(const char *boxdir, const State *st, char *err, size_t errlen) {
     return replacefile(tmp, path, f, err, errlen);
 }
 
-int uvload(const char *boxdir, uint32_t *uidval, uint32_t *lastuid, char *err,
-           size_t errlen) {
+int uvload(const char *boxdir, uint32_t *uidval, uint32_t *lastuid, char *err, size_t errlen) {
     char path[4160];
     FILE *f;
 
@@ -163,8 +161,7 @@ int uvload(const char *boxdir, uint32_t *uidval, uint32_t *lastuid, char *err,
     return 1;
 }
 
-int uvwrite(const char *boxdir, uint32_t uidval, uint32_t lastuid, char *err,
-            size_t errlen) {
+int uvwrite(const char *boxdir, uint32_t uidval, uint32_t lastuid, char *err, size_t errlen) {
     char tmp[4160], path[4160];
     FILE *f;
 

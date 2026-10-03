@@ -40,8 +40,7 @@ static const char *shorthost(void) {
 
 /* filenames look like "1778851759.23580_1.host,U=123:2,S" - mbsync stores
  * the server uid after ,U= and maildir keeps flag letters after :2, */
-static int scanone(const char *boxdir, const char *sub, int indir, Box *box,
-                   char *err, size_t errlen) {
+static int scanone(const char *boxdir, const char *sub, int indir, Box *box, char *err, size_t errlen) {
     char path[4160];
     DIR *d;
     struct dirent *e;
@@ -106,8 +105,7 @@ int mdensure(const char *boxdir, char *err, size_t errlen) {
 
 int boxscan(const char *boxdir, Box *box, char *err, size_t errlen) {
     memset(box, 0, sizeof *box);
-    if (scanone(boxdir, "cur", 0, box, err, errlen) < 0 ||
-        scanone(boxdir, "new", 1, box, err, errlen) < 0)
+    if (scanone(boxdir, "cur", 0, box, err, errlen) < 0 || scanone(boxdir, "new", 1, box, err, errlen) < 0)
         return -1;
     return 0;
 }
@@ -127,14 +125,12 @@ int mdtmp(char *dst, size_t cap, const char *boxdir) {
 
 /* move a downloaded message from tmp/ into the maildir; unseen mail goes to
  * new/, everything else to cur/, matching what mbsync produces */
-int mdplace(const char *boxdir, uint32_t nuid, unsigned flags,
-            const char *tmppath, char *err, size_t errlen) {
+int mdplace(const char *boxdir, uint32_t nuid, unsigned flags, const char *tmppath, char *err, size_t errlen) {
     char path[4160], fl[8];
 
     flagletters(flags, fl);
-    snprintf(path, sizeof path, "%s/%s/%ld.%d_%d.%s,U=%u:2,%s", boxdir,
-             (flags & FSeen) ? "cur" : "new", (long)time(NULL), (int)getpid(),
-             nextseq(), shorthost(), nuid, fl);
+    snprintf(path, sizeof path, "%s/%s/%ld.%d_%d.%s,U=%u:2,%s", boxdir, (flags & FSeen) ? "cur" : "new", (long)time(NULL), (int)getpid(), nextseq(),
+             shorthost(), nuid, fl);
     if (rename(tmppath, path) < 0) {
         snprintf(err, errlen, "rename into %s: %s", path, strerror(errno));
         return -1;
@@ -149,12 +145,10 @@ static size_t basename_len(const char *name) {
     return colon ? (size_t)(colon - name) : strlen(name);
 }
 
-static int mdrename(const char *boxdir, const Local *m, const char *newsub,
-                    const char *newname, char *err, size_t errlen) {
+static int mdrename(const char *boxdir, const Local *m, const char *newsub, const char *newname, char *err, size_t errlen) {
     char oldp[4160], newp[4160];
 
-    snprintf(oldp, sizeof oldp, "%s/%s/%s", boxdir, m->indir ? "new" : "cur",
-             m->name);
+    snprintf(oldp, sizeof oldp, "%s/%s/%s", boxdir, m->indir ? "new" : "cur", m->name);
     snprintf(newp, sizeof newp, "%s/%s/%s", boxdir, newsub, newname);
     if (rename(oldp, newp) < 0) {
         snprintf(err, errlen, "rename %s: %s", m->name, strerror(errno));
@@ -163,8 +157,7 @@ static int mdrename(const char *boxdir, const Local *m, const char *newsub,
     return 0;
 }
 
-int mdsetflags(const char *boxdir, const Local *m, unsigned flags, char *err,
-               size_t errlen) {
+int mdsetflags(const char *boxdir, const Local *m, unsigned flags, char *err, size_t errlen) {
     char name[512], fl[8];
     size_t blen = basename_len(m->name);
     const char *sub;
@@ -181,8 +174,7 @@ int mdsetflags(const char *boxdir, const Local *m, unsigned flags, char *err,
 }
 
 /* give a locally-new message its near uid after a successful push */
-int mdassignuid(const char *boxdir, const Local *m, uint32_t nuid, char *err,
-                size_t errlen) {
+int mdassignuid(const char *boxdir, const Local *m, uint32_t nuid, char *err, size_t errlen) {
     char name[512], fl[8];
     size_t blen = basename_len(m->name);
 
@@ -198,8 +190,7 @@ int mdassignuid(const char *boxdir, const Local *m, uint32_t nuid, char *err,
 int mddelete(const char *boxdir, const Local *m, char *err, size_t errlen) {
     char path[4160];
 
-    snprintf(path, sizeof path, "%s/%s/%s", boxdir, m->indir ? "new" : "cur",
-             m->name);
+    snprintf(path, sizeof path, "%s/%s/%s", boxdir, m->indir ? "new" : "cur", m->name);
     if (unlink(path) < 0 && errno != ENOENT) {
         snprintf(err, errlen, "unlink %s: %s", m->name, strerror(errno));
         return -1;
@@ -207,12 +198,10 @@ int mddelete(const char *boxdir, const Local *m, char *err, size_t errlen) {
     return 0;
 }
 
-int mddeliver(const char *boxdir, const char *tmppath, char *err,
-              size_t errlen) {
+int mddeliver(const char *boxdir, const char *tmppath, char *err, size_t errlen) {
     char path[4160];
 
-    snprintf(path, sizeof path, "%s/new/%ld.%d_%d.%s:2,", boxdir,
-             (long)time(NULL), (int)getpid(), nextseq(), shorthost());
+    snprintf(path, sizeof path, "%s/new/%ld.%d_%d.%s:2,", boxdir, (long)time(NULL), (int)getpid(), nextseq(), shorthost());
     if (rename(tmppath, path) < 0) {
         snprintf(err, errlen, "rename into %s: %s", path, strerror(errno));
         return -1;

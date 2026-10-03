@@ -25,8 +25,7 @@ typedef struct {
 } Job;
 
 static pthread_mutex_t outmtx = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t pwmtx =
-    PTHREAD_MUTEX_INITIALIZER; /* one pinentry at a time */
+static pthread_mutex_t pwmtx = PTHREAD_MUTEX_INITIALIZER; /* one pinentry at a time */
 
 void report(const char *label, const char *fmt, ...) {
     va_list ap;
@@ -78,8 +77,7 @@ int boxroot(const char *box, char *out, size_t cap) {
         return 0;
     n = (size_t)(slash - box);
     for (a = 0; a < naccounts; a++)
-        if (n == strlen(accounts[a].name) &&
-            !strncmp(box, accounts[a].name, n)) {
+        if (n == strlen(accounts[a].name) && !strncmp(box, accounts[a].name, n)) {
             expand(accounts[a].maildir, root, sizeof root);
             snprintf(out, cap, "%s/%s", root, slash + 1);
             return 1;
@@ -112,8 +110,7 @@ static long expungelocal(const char *dir, int depth) {
             const char *info = strstr(e->d_name, ":2,");
             if (!info || !strchr(info + 3, 'T'))
                 continue;
-            snprintf(path, sizeof path, "%.4000s/%s/%.300s", dir, subs[k],
-                     e->d_name);
+            snprintf(path, sizeof path, "%.4000s/%s/%.300s", dir, subs[k], e->d_name);
             if (unlink(path) == 0)
                 n++;
         }
@@ -122,8 +119,7 @@ static long expungelocal(const char *dir, int depth) {
     if (depth > 3 || !(dp = opendir(dir)))
         return n;
     while ((e = readdir(dp))) {
-        if (e->d_name[0] == '.' || !strcmp(e->d_name, "cur") ||
-            !strcmp(e->d_name, "new") || !strcmp(e->d_name, "tmp"))
+        if (e->d_name[0] == '.' || !strcmp(e->d_name, "cur") || !strcmp(e->d_name, "new") || !strcmp(e->d_name, "tmp"))
             continue;
         snprintf(path, sizeof path, "%.4000s/%.300s", dir, e->d_name);
         if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
@@ -133,8 +129,7 @@ static long expungelocal(const char *dir, int depth) {
     return n;
 }
 
-static Imap *acctconnect(const Account *a, const char *pass, char *err,
-                         size_t errlen) {
+static Imap *acctconnect(const Account *a, const char *pass, char *err, size_t errlen) {
     Imap *im = imapconnect(a->host, a->port, err, errlen);
 
     if (!im)
@@ -305,8 +300,7 @@ int main(int argc, char *argv[]) {
             rc = jobs[i].rc;
     }
     clock_gettime(CLOCK_MONOTONIC, &t1);
-    printf("%.2fs\n", (double)(t1.tv_sec - t0.tv_sec) +
-                          (double)(t1.tv_nsec - t0.tv_nsec) / 1e9);
+    printf("%.2fs\n", (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9);
     if (mode == MSync) {
         char root[4096];
         long n;

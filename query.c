@@ -65,8 +65,7 @@ static char *token(Parser *p) {
         for (; *s; s++) {
             if (*s == '"')
                 q = !q;
-            else if (!q && (*s == ' ' || *s == '\t' || *s == '\n' ||
-                            *s == '(' || *s == ')'))
+            else if (!q && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '(' || *s == ')'))
                 break;
         }
     p->s = s;
@@ -84,9 +83,7 @@ static char *peek(Parser *p) {
     return t;
 }
 
-static int iskw(const char *t, const char *kw) {
-    return t && !strcasecmp(t, kw);
-}
+static int iskw(const char *t, const char *kw) { return t && !strcasecmp(t, kw); }
 
 static Node *node(int op, Node *l, Node *r) {
     Node *n = calloc(1, sizeof *n);
@@ -283,8 +280,7 @@ static int daterange(const char *v, long *from, long *to) {
     } else {
         snprintf(a, sizeof a, "%s", v);
         snprintf(b, sizeof b, "%s", v);
-        if (isdigit((unsigned char)*v) &&
-            !isdigit((unsigned char)v[strlen(v) - 1]))
+        if (isdigit((unsigned char)*v) && !isdigit((unsigned char)v[strlen(v) - 1]))
             b[0] = '\0'; /* "7d" alone means 7d..now */
     }
     return datepoint(a, 0, from) < 0 || datepoint(b, 1, to) < 0 ? -1 : 0;
@@ -345,20 +341,13 @@ static void compterm(Query *c, const Node *n) {
     char buf[64];
     long a, b;
 
-    if (p && (!strcmp(p, "tag") || !strcmp(p, "id") || !strcmp(p, "thread") ||
-              !strcmp(p, "path") || !strcmp(p, "folder")))
+    if (p && (!strcmp(p, "tag") || !strcmp(p, "id") || !strcmp(p, "thread") || !strcmp(p, "path") || !strcmp(p, "folder")))
         v = unquote(n->val);
 
     if (!p && !strcmp(v, "*")) {
         sadd(&c->sql, "1");
-    } else if (!p || !strcmp(p, "subject") || !strcmp(p, "from") ||
-               !strcmp(p, "to") || !strcmp(p, "attachment") ||
-               !strcmp(p, "body")) {
-        const char *col = !p                         ? NULL
-                          : !strcmp(p, "from")       ? "sender"
-                          : !strcmp(p, "to")         ? "rcpt"
-                          : !strcmp(p, "attachment") ? "attach"
-                                                     : p;
+    } else if (!p || !strcmp(p, "subject") || !strcmp(p, "from") || !strcmp(p, "to") || !strcmp(p, "attachment") || !strcmp(p, "body")) {
+        const char *col = !p ? NULL : !strcmp(p, "from") ? "sender" : !strcmp(p, "to") ? "rcpt" : !strcmp(p, "attachment") ? "attach" : p;
         char *m = ftsmatch(col, v);
         if (!strcmp(m, "\"\"") || strstr(m, ": \"\"")) {
             seterr(&c->err, "empty search term", "");
@@ -383,8 +372,7 @@ static void compterm(Query *c, const Node *n) {
         sadd(&c->sql, "mid=");
         bindparam(c, m);
     } else if (!strcmp(p, "thread")) {
-        snprintf(buf, sizeof buf, "thread=%llu",
-                 (unsigned long long)strtoull(v, NULL, 16));
+        snprintf(buf, sizeof buf, "thread=%llu", (unsigned long long)strtoull(v, NULL, 16));
         sadd(&c->sql, buf);
     } else if (!strcmp(p, "path") || !strcmp(p, "folder")) {
         size_t k = strlen(v);
@@ -473,8 +461,7 @@ void queryfree(Query *c) {
 }
 
 /* prepare sql with the query's WHERE spliced in at "%s", params bound */
-sqlite3_stmt *queryprep(sqlite3 *db, const char *fmt, const Query *c,
-                        const char *tail, char **err) {
+sqlite3_stmt *queryprep(sqlite3 *db, const char *fmt, const Query *c, const char *tail, char **err) {
     char *sql = NULL;
     sqlite3_stmt *st;
     const char *pct = strstr(fmt, "%s");
@@ -601,8 +588,7 @@ static void addauthor(Thread *t, const char *from) {
         const char *p = t->authors;
         size_t k = strlen(name);
         while ((p = strstr(p, name))) {
-            if ((p == t->authors || !strncmp(p - 2, ", ", 2)) &&
-                (p[k] == '\0' || !strncmp(p + k, ", ", 2)))
+            if ((p == t->authors || !strncmp(p - 2, ", ", 2)) && (p[k] == '\0' || !strncmp(p + k, ", ", 2)))
                 return;
             p++;
         }
@@ -617,8 +603,7 @@ static void threadtags(sqlite3 *db, const Thread *t, char ***tags) {
     sqlite3_stmt *st;
     ptrdiff_t i, k;
 
-    sqlite3_prepare_v2(db, "SELECT name FROM tag WHERE msg=? ORDER BY name", -1,
-                       &st, NULL);
+    sqlite3_prepare_v2(db, "SELECT name FROM tag WHERE msg=? ORDER BY name", -1, &st, NULL);
     for (i = 0; i < arrlen(t->ids); i++) {
         sqlite3_bind_int64(st, 1, t->ids[i]);
         while (sqlite3_step(st) == SQLITE_ROW) {
@@ -634,9 +619,7 @@ static void threadtags(sqlite3 *db, const Thread *t, char ***tags) {
     sqlite3_finalize(st);
 }
 
-static int cmpstr(const void *a, const void *b) {
-    return strcmp(*(char *const *)a, *(char *const *)b);
-}
+static int cmpstr(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
 static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     sqlite3_stmt *st, *total;
@@ -645,9 +628,7 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     int json = !strcmp(o->format, "json"), threadsonly, rc;
     char date[32];
 
-    if (!(st = queryprep(
-              db, "SELECT id,thread,date,sender,subject FROM msg WHERE %s", c,
-              " ORDER BY thread,date", err)))
+    if (!(st = queryprep(db, "SELECT id,thread,date,sender,subject FROM msg WHERE %s", c, " ORDER BY thread,date", err)))
         return -1;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         sqlite3_int64 id = sqlite3_column_int64(st, 0);
@@ -682,8 +663,7 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     /* never qsort an empty stb array: its NULL base is a nonnull argument
      * and GCC then deletes arrlen's own NULL check downstream (-O2) */
     if (arrlen(ts) > 1)
-        qsort(ts, (size_t)arrlen(ts), sizeof *ts,
-              o->oldest ? cmpoldest : cmpnewest);
+        qsort(ts, (size_t)arrlen(ts), sizeof *ts, o->oldest ? cmpoldest : cmpnewest);
     n = arrlen(ts);
     if (o->offset < n)
         n -= o->offset;
@@ -692,8 +672,7 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     if (o->limit >= 0 && o->limit < n)
         n = o->limit;
     threadsonly = !strcmp(o->output, "threads");
-    sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM msg WHERE thread=?", -1,
-                       &total, NULL);
+    sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM msg WHERE thread=?", -1, &total, NULL);
     if (json)
         putchar('[');
     for (i = 0; i < n; i++) {
@@ -709,8 +688,7 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
             continue;
         }
         sqlite3_bind_int64(total, 1, t->thread);
-        tot = sqlite3_step(total) == SQLITE_ROW ? sqlite3_column_int(total, 0)
-                                                : t->matched;
+        tot = sqlite3_step(total) == SQLITE_ROW ? sqlite3_column_int(total, 0) : t->matched;
         sqlite3_reset(total);
         threadtags(db, t, &tags);
         if (arrlen(tags) > 1)
@@ -720,11 +698,9 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
             printf(i ? ",\n{" : "\n{");
             printf("\"thread\": \"%016llx\", \"timestamp\": %ld, "
                    "\"date_relative\": ",
-                   (unsigned long long)t->thread,
-                   o->oldest ? t->oldest : t->newest);
+                   (unsigned long long)t->thread, o->oldest ? t->oldest : t->newest);
             jsonstr(date);
-            printf(", \"matched\": %d, \"total\": %d, \"authors\": ",
-                   t->matched, tot);
+            printf(", \"matched\": %d, \"total\": %d, \"authors\": ", t->matched, tot);
             jsonstr(t->authors);
             printf(", \"subject\": ");
             jsonstr(t->subject);
@@ -735,9 +711,7 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
             }
             printf("]}");
         } else {
-            printf("thread:%016llx %12s [%d/%d] %s; %s (",
-                   (unsigned long long)t->thread, date, t->matched, tot,
-                   t->authors, t->subject);
+            printf("thread:%016llx %12s [%d/%d] %s; %s (", (unsigned long long)t->thread, date, t->matched, tot, t->authors, t->subject);
             for (k = 0; k < arrlen(tags); k++)
                 printf("%s%s", k ? " " : "", tags[k]);
             puts(")");
@@ -760,8 +734,7 @@ static int summary(sqlite3 *db, const Query *c, const Opts *o, char **err) {
 
 /* the absolute path of a maildir file the index knows as (box, sub, name);
  * 0 when the box belongs to an account that is no longer configured */
-int filepath(const char *box, const char *sub, const char *name, char *out,
-             size_t cap) {
+int filepath(const char *box, const char *sub, const char *name, char *out, size_t cap) {
     char dir[4096];
 
     if (!boxroot(box, dir, sizeof dir))
@@ -778,11 +751,9 @@ static int listing(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     int json = !strcmp(o->format, "json"), files = 0, rc;
     long i = 0;
 
-    snprintf(tail, sizeof tail, " LIMIT %ld OFFSET %ld",
-             o->limit < 0 ? -1L : o->limit, o->offset);
+    snprintf(tail, sizeof tail, " LIMIT %ld OFFSET %ld", o->limit < 0 ? -1L : o->limit, o->offset);
     if (!strcmp(o->output, "messages")) {
-        sql = o->oldest ? "SELECT mid FROM msg WHERE %s ORDER BY date"
-                        : "SELECT mid FROM msg WHERE %s ORDER BY date DESC";
+        sql = o->oldest ? "SELECT mid FROM msg WHERE %s ORDER BY date" : "SELECT mid FROM msg WHERE %s ORDER BY date DESC";
     } else if (!strcmp(o->output, "files")) {
         sql = o->oldest ? "SELECT box,sub,name FROM file JOIN msg ON msg.id="
                           "file.msg WHERE %s ORDER BY date,box"
@@ -803,9 +774,7 @@ static int listing(sqlite3 *db, const Query *c, const Opts *o, char **err) {
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         const char *s = (const char *)sqlite3_column_text(st, 0);
         if (files) {
-            if (!filepath(s, (const char *)sqlite3_column_text(st, 1),
-                          (const char *)sqlite3_column_text(st, 2), line,
-                          sizeof line))
+            if (!filepath(s, (const char *)sqlite3_column_text(st, 1), (const char *)sqlite3_column_text(st, 2), line, sizeof line))
                 continue; /* box of an account no longer configured */
             s = line;
         } else if (!strcmp(o->output, "messages") && !json) {
@@ -920,8 +889,7 @@ static int count1(sqlite3 *db, const char *sql, const char *q, char **err) {
 
     if (querycompile(q, &c, err) < 0)
         return -1;
-    if (!(st = queryprep(db, sql, &c, "", err)) ||
-        sqlite3_step(st) != SQLITE_ROW) {
+    if (!(st = queryprep(db, sql, &c, "", err)) || sqlite3_step(st) != SQLITE_ROW) {
         seterr(err, "%s", sqlite3_errmsg(db));
         queryfree(&c);
         return -1;
@@ -1038,9 +1006,7 @@ static char **words(char *s) {
             p++;
         if (!*p)
             break;
-        for (b = p;
-             *p && (isalnum((unsigned char)*p) || (unsigned char)*p & 0x80);
-             p++)
+        for (b = p; *p && (isalnum((unsigned char)*p) || (unsigned char)*p & 0x80); p++)
             *p = (char)tolower((unsigned char)*p);
         if (*p)
             *p++ = '\0';
@@ -1059,8 +1025,7 @@ static void boxname(const char *m, char *out, size_t cap) {
         return;
     while (m < e && (isspace((unsigned char)*m) || *m == '"' || *m == '\''))
         m++;
-    while (e > m &&
-           (isspace((unsigned char)e[-1]) || e[-1] == '"' || e[-1] == '\''))
+    while (e > m && (isspace((unsigned char)e[-1]) || e[-1] == '"' || e[-1] == '\''))
         e--;
     for (; m < e && n + 1 < cap; m++)
         if (*m != '\\')
@@ -1071,9 +1036,7 @@ static void boxname(const char *m, char *out, size_t cap) {
 /* addresses no person reads: bounce handlers, no-reply senders and
  * notification relays (whose display name is whoever triggered one) */
 static int machine(const char *bare) {
-    static const char *const bad[] = {
-        "bounce",     "noreply",      "no-reply",      "no_reply",
-        "donotreply", "do-not-reply", "mailer-daemon", "notification"};
+    static const char *const bad[] = {"bounce", "noreply", "no-reply", "no_reply", "donotreply", "do-not-reply", "mailer-daemon", "notification"};
     const char *at = strchr(bare, '@');
     char local[256];
     size_t k;
@@ -1085,8 +1048,7 @@ static int machine(const char *bare) {
     return 0;
 }
 
-static void tally(AddrKV **h, char **ws, const char *list, int sent,
-                  long date) {
+static void tally(AddrKV **h, char **ws, const char *list, int sent, long date) {
     char **l = NULL, bare[256], name[256], hay[520];
     ptrdiff_t i, j;
     int k;
@@ -1130,8 +1092,7 @@ static void tally(AddrKV **h, char **ws, const char *list, int sent,
 /* people we wrote to first (most often, then most recently), then the
  * ones who only wrote to us */
 static int addrcmp(const void *x, const void *y) {
-    const Addr *a = &((const AddrKV *)x)->value,
-               *b = &((const AddrKV *)y)->value;
+    const Addr *a = &((const AddrKV *)x)->value, *b = &((const AddrKV *)y)->value;
 
     if ((a->sent > 0) != (b->sent > 0))
         return a->sent > 0 ? -1 : 1;
@@ -1181,14 +1142,13 @@ int addressmain(int argc, char **argv) {
     arrput(match, '\0');
     if (!(db = dbopen(dberr, sizeof dberr)))
         return fail("address", strdup(dberr));
-    if (sqlite3_prepare_v2(
-            db,
-            arrlen(ws) ? "SELECT sender,rcpt,date,id IN (SELECT msg FROM tag"
-                         " WHERE name='sent') FROM msg WHERE id IN (SELECT"
-                         " rowid FROM fts WHERE fts MATCH ?)"
-                       : "SELECT sender,rcpt,date,1 FROM msg WHERE id IN"
-                         " (SELECT msg FROM tag WHERE name='sent')",
-            -1, &st, NULL) != SQLITE_OK) {
+    if (sqlite3_prepare_v2(db,
+                           arrlen(ws) ? "SELECT sender,rcpt,date,id IN (SELECT msg FROM tag"
+                                        " WHERE name='sent') FROM msg WHERE id IN (SELECT"
+                                        " rowid FROM fts WHERE fts MATCH ?)"
+                                      : "SELECT sender,rcpt,date,1 FROM msg WHERE id IN"
+                                        " (SELECT msg FROM tag WHERE name='sent')",
+                           -1, &st, NULL) != SQLITE_OK) {
         fail("address", strdup(sqlite3_errmsg(db)));
         sqlite3_close(db);
         return 2;

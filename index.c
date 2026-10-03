@@ -25,33 +25,32 @@
 
 #include "hml.h"
 
-static const char *schema =
-    "PRAGMA journal_mode=WAL;"
-    "PRAGMA synchronous=NORMAL;"
-    "CREATE TABLE IF NOT EXISTS dir(path TEXT PRIMARY KEY, mtime INTEGER);"
-    "CREATE TABLE IF NOT EXISTS msg(id INTEGER PRIMARY KEY,"
-    " mid TEXT NOT NULL UNIQUE, thread INTEGER NOT NULL, date INTEGER NOT NULL,"
-    " subject TEXT NOT NULL, sender TEXT NOT NULL,"
-    " attach INTEGER NOT NULL DEFAULT 0, intent TEXT NOT NULL DEFAULT '');"
-    "CREATE INDEX IF NOT EXISTS msg_thread ON msg(thread);"
-    "CREATE INDEX IF NOT EXISTS msg_date ON msg(date);"
-    "CREATE TABLE IF NOT EXISTS file(box TEXT NOT NULL, base TEXT NOT NULL,"
-    " sub TEXT NOT NULL, name TEXT NOT NULL, flags TEXT NOT NULL,"
-    " msg INTEGER NOT NULL, PRIMARY KEY(box, base));"
-    "CREATE INDEX IF NOT EXISTS file_msg ON file(msg);"
-    "CREATE TABLE IF NOT EXISTS ref(msg INTEGER NOT NULL, mid TEXT NOT NULL);"
-    "CREATE INDEX IF NOT EXISTS ref_mid ON ref(mid);"
-    "CREATE INDEX IF NOT EXISTS ref_msg ON ref(msg);"
-    "CREATE TABLE IF NOT EXISTS tag(msg INTEGER NOT NULL, name TEXT NOT NULL,"
-    " PRIMARY KEY(msg, name)) WITHOUT ROWID;"
-    "CREATE INDEX IF NOT EXISTS tag_name ON tag(name, msg);"
-    "CREATE TABLE IF NOT EXISTS utag(mid TEXT NOT NULL, name TEXT NOT NULL,"
-    " val INTEGER NOT NULL, PRIMARY KEY(mid, name)) WITHOUT ROWID;"
-    "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, val);"
-    "CREATE TEMP TABLE IF NOT EXISTS newmsg(id INTEGER PRIMARY KEY);"
-    "CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(subject, sender, rcpt,"
-    " attach, body, content='', contentless_delete=1,"
-    " tokenize='unicode61 remove_diacritics 2');";
+static const char *schema = "PRAGMA journal_mode=WAL;"
+                            "PRAGMA synchronous=NORMAL;"
+                            "CREATE TABLE IF NOT EXISTS dir(path TEXT PRIMARY KEY, mtime INTEGER);"
+                            "CREATE TABLE IF NOT EXISTS msg(id INTEGER PRIMARY KEY,"
+                            " mid TEXT NOT NULL UNIQUE, thread INTEGER NOT NULL, date INTEGER NOT NULL,"
+                            " subject TEXT NOT NULL, sender TEXT NOT NULL,"
+                            " attach INTEGER NOT NULL DEFAULT 0, intent TEXT NOT NULL DEFAULT '');"
+                            "CREATE INDEX IF NOT EXISTS msg_thread ON msg(thread);"
+                            "CREATE INDEX IF NOT EXISTS msg_date ON msg(date);"
+                            "CREATE TABLE IF NOT EXISTS file(box TEXT NOT NULL, base TEXT NOT NULL,"
+                            " sub TEXT NOT NULL, name TEXT NOT NULL, flags TEXT NOT NULL,"
+                            " msg INTEGER NOT NULL, PRIMARY KEY(box, base));"
+                            "CREATE INDEX IF NOT EXISTS file_msg ON file(msg);"
+                            "CREATE TABLE IF NOT EXISTS ref(msg INTEGER NOT NULL, mid TEXT NOT NULL);"
+                            "CREATE INDEX IF NOT EXISTS ref_mid ON ref(mid);"
+                            "CREATE INDEX IF NOT EXISTS ref_msg ON ref(msg);"
+                            "CREATE TABLE IF NOT EXISTS tag(msg INTEGER NOT NULL, name TEXT NOT NULL,"
+                            " PRIMARY KEY(msg, name)) WITHOUT ROWID;"
+                            "CREATE INDEX IF NOT EXISTS tag_name ON tag(name, msg);"
+                            "CREATE TABLE IF NOT EXISTS utag(mid TEXT NOT NULL, name TEXT NOT NULL,"
+                            " val INTEGER NOT NULL, PRIMARY KEY(mid, name)) WITHOUT ROWID;"
+                            "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, val);"
+                            "CREATE TEMP TABLE IF NOT EXISTS newmsg(id INTEGER PRIMARY KEY);"
+                            "CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(subject, sender, rcpt,"
+                            " attach, body, content='', contentless_delete=1,"
+                            " tokenize='unicode61 remove_diacritics 2');";
 
 /* one code point as UTF-8, appended */
 static void putcp(char *out, size_t cap, unsigned cp) {
@@ -134,11 +133,8 @@ static void refine(sqlite3 *db) {
                        " GROUP BY msg HAVING COUNT(*)>1)",
                        -1, &st, NULL);
     while (sqlite3_step(st) == SQLITE_ROW) {
-        Cand c = {sqlite3_column_int64(st, 0), NULL, 0,
-                  sqlite3_column_int(st, 4)};
-        if (!filepath((const char *)sqlite3_column_text(st, 1),
-                      (const char *)sqlite3_column_text(st, 2),
-                      (const char *)sqlite3_column_text(st, 3), path,
+        Cand c = {sqlite3_column_int64(st, 0), NULL, 0, sqlite3_column_int(st, 4)};
+        if (!filepath((const char *)sqlite3_column_text(st, 1), (const char *)sqlite3_column_text(st, 2), (const char *)sqlite3_column_text(st, 3), path,
                       sizeof path))
             continue;
         c.path = strdup(path);
@@ -168,13 +164,9 @@ static void refine(sqlite3 *db) {
         for (i = 0; i < arrlen(refine_q.c); i++)
             if (refine_q.c[i].keep)
                 hmput(keep, refine_q.c[i].id, 1);
-        sqlite3_prepare_v2(db, "UPDATE msg SET attach=0 WHERE id=?", -1,
-                           &unmark, NULL);
-        sqlite3_prepare_v2(db,
-                           "DELETE FROM tag WHERE msg=? AND name='attachment'",
-                           -1, &untag, NULL);
-        sqlite3_prepare_v2(db, "UPDATE msg SET attach=1 WHERE id=?", -1, &mark,
-                           NULL);
+        sqlite3_prepare_v2(db, "UPDATE msg SET attach=0 WHERE id=?", -1, &unmark, NULL);
+        sqlite3_prepare_v2(db, "DELETE FROM tag WHERE msg=? AND name='attachment'", -1, &untag, NULL);
+        sqlite3_prepare_v2(db, "UPDATE msg SET attach=1 WHERE id=?", -1, &mark, NULL);
         sqlite3_prepare_v2(db,
                            "INSERT OR IGNORE INTO tag(msg,name) VALUES"
                            "(?,'attachment')",
@@ -237,8 +229,7 @@ static void ensurecol(sqlite3 *db, const char *name) {
         have = sqlite3_step(st) == SQLITE_ROW;
         sqlite3_finalize(st);
     }
-    snprintf(q, sizeof q,
-             "ALTER TABLE msg ADD COLUMN %s TEXT NOT NULL DEFAULT ''", name);
+    snprintf(q, sizeof q, "ALTER TABLE msg ADD COLUMN %s TEXT NOT NULL DEFAULT ''", name);
     if (!have)
         sqlite3_exec(db, q, NULL, NULL, NULL);
 }
@@ -257,17 +248,14 @@ static void migrate(sqlite3 *db) {
         have = sqlite3_step(st) == SQLITE_ROW;
         sqlite3_finalize(st);
     }
-    if (have &&
-        sqlite3_prepare_v2(db, "SELECT 1 FROM meta WHERE key='attachstrict'",
-                           -1, &st, NULL) == SQLITE_OK) {
+    if (have && sqlite3_prepare_v2(db, "SELECT 1 FROM meta WHERE key='attachstrict'", -1, &st, NULL) == SQLITE_OK) {
         strict = sqlite3_step(st) == SQLITE_ROW;
         sqlite3_finalize(st);
     }
     if (have && strict)
         return;
     for (cp = 0; cp < 0x460; cp++) {
-        if (!((cp >= 'a' && cp <= 'z') || (cp >= '0' && cp <= '9') ||
-              (cp >= 0x430 && cp <= 0x45F) || (cp >= 0x3B1 && cp <= 0x3C9)))
+        if (!((cp >= 'a' && cp <= 'z') || (cp >= '0' && cp <= '9') || (cp >= 0x430 && cp <= 0x45F) || (cp >= 0x3B1 && cp <= 0x3C9)))
             continue;
         if (strlen(q) + 16 >= sizeof q)
             break;
@@ -328,11 +316,9 @@ sqlite3 *dbopen(char *err, size_t errlen) {
 
 typedef struct {
     sqlite3 *db;
-    sqlite3_stmt *msgbymid, *insmsg, *setthread, *merge, *insfts, *delfts,
-        *insref, *delref, *insfile, *mvfile, *delfile, *filemsg, *nfiles,
-        *delmsg, *deltag, *instag, *msgfiles, *boxfiles, *dirget, *dirset,
-        *midof, *utagget, *utagset, *utagdel, *filesof, *attachof, *setattach,
-        *intentof, *metaget, *metaset, *insnew;
+    sqlite3_stmt *msgbymid, *insmsg, *setthread, *merge, *insfts, *delfts, *insref, *delref, *insfile, *mvfile, *delfile, *filemsg, *nfiles, *delmsg, *deltag,
+        *instag, *msgfiles, *boxfiles, *dirget, *dirset, *midof, *utagget, *utagset, *utagdel, *filesof, *attachof, *setattach, *intentof, *metaget, *metaset,
+        *insnew;
     long added, moved, removed, newmsgs;
 } Db;
 
@@ -367,8 +353,7 @@ static void prepall(Db *d) {
     d->delref = prep(d, "DELETE FROM ref WHERE msg=?");
     d->insfile = prep(d, "INSERT OR REPLACE INTO file(box,base,sub,name,flags,"
                          "msg) VALUES(?,?,?,?,?,?)");
-    d->mvfile =
-        prep(d, "UPDATE file SET sub=?,name=?,flags=? WHERE box=? AND base=?");
+    d->mvfile = prep(d, "UPDATE file SET sub=?,name=?,flags=? WHERE box=? AND base=?");
     d->delfile = prep(d, "DELETE FROM file WHERE box=? AND base=?");
     d->filemsg = prep(d, "SELECT msg FROM file WHERE box=? AND base=?");
     d->nfiles = prep(d, "SELECT COUNT(*) FROM file WHERE msg=?");
@@ -376,17 +361,14 @@ static void prepall(Db *d) {
     d->deltag = prep(d, "DELETE FROM tag WHERE msg=?");
     d->instag = prep(d, "INSERT OR IGNORE INTO tag(msg,name) VALUES(?,?)");
     d->msgfiles = prep(d, "SELECT box,flags FROM file WHERE msg=?");
-    d->boxfiles =
-        prep(d, "SELECT base,sub,name,flags,msg FROM file WHERE box=?");
+    d->boxfiles = prep(d, "SELECT base,sub,name,flags,msg FROM file WHERE box=?");
     d->dirget = prep(d, "SELECT mtime FROM dir WHERE path=?");
     d->dirset = prep(d, "INSERT OR REPLACE INTO dir(path,mtime) VALUES(?,?)");
     d->midof = prep(d, "SELECT mid FROM msg WHERE id=?");
     d->utagget = prep(d, "SELECT name,val FROM utag WHERE mid=?");
-    d->utagset =
-        prep(d, "INSERT OR REPLACE INTO utag(mid,name,val) VALUES(?,?,?)");
+    d->utagset = prep(d, "INSERT OR REPLACE INTO utag(mid,name,val) VALUES(?,?,?)");
     d->utagdel = prep(d, "DELETE FROM utag WHERE mid=? AND name=?");
-    d->filesof =
-        prep(d, "SELECT box,base,sub,name,flags FROM file WHERE msg=?");
+    d->filesof = prep(d, "SELECT box,base,sub,name,flags FROM file WHERE msg=?");
     d->metaget = prep(d, "SELECT val FROM meta WHERE key=?");
     d->metaset = prep(d, "INSERT OR REPLACE INTO meta(key,val) VALUES(?,?)");
     d->insnew = prep(d, "INSERT OR IGNORE INTO newmsg(id) VALUES(?)");
@@ -406,13 +388,9 @@ static sqlite3_int64 step1(Db *d, sqlite3_stmt *st) {
     return r;
 }
 
-static void bindtext(sqlite3_stmt *st, int i, const char *s) {
-    sqlite3_bind_text(st, i, s, -1, SQLITE_TRANSIENT);
-}
+static void bindtext(sqlite3_stmt *st, int i, const char *s) { sqlite3_bind_text(st, i, s, -1, SQLITE_TRANSIENT); }
 
-static void sadd(char **s, const char *t) {
-    memcpy(arraddnptr(*s, strlen(t)), t, strlen(t));
-}
+static void sadd(char **s, const char *t) { memcpy(arraddnptr(*s, strlen(t)), t, strlen(t)); }
 
 static void exec(Db *d, const char *sql) {
     if (sqlite3_exec(d->db, sql, NULL, NULL, NULL) != SQLITE_OK)
@@ -583,8 +561,7 @@ static int localrow(const char *box) {
 /* apply the flag ops to every file of a message: rename in the maildir
  * (seen mail graduates new/ -> cur/), mirror the row, drop any stale
  * override of the same name, then recompute the tags */
-static void mirrorflags(Db *d, sqlite3_int64 id, const char *mid,
-                        const Op *ops) {
+static void mirrorflags(Db *d, sqlite3_int64 id, const char *mid, const Op *ops) {
     typedef struct {
         char *box, *base, *sub, *name, *flags;
     } Row;
@@ -610,8 +587,7 @@ static void mirrorflags(Db *d, sqlite3_int64 id, const char *mid,
         Local m;
         for (k = 0; k < arrlen(ops); k++) {
             inv = 0;
-            if (!(bit = flagof(ops[k].name, &inv)) &&
-                (strcmp(ops[k].name, "deleted") || !localrow(rows[i].box)))
+            if (!(bit = flagof(ops[k].name, &inv)) && (strcmp(ops[k].name, "deleted") || !localrow(rows[i].box)))
                 continue;
             if (!bit)
                 bit = FDeleted;
@@ -627,16 +603,12 @@ static void mirrorflags(Db *d, sqlite3_int64 id, const char *mid,
         m.name = rows[i].name;
         m.indir = !strcmp(rows[i].sub, "new");
         if (mdsetflags(boxdir, &m, nf, err, sizeof err) < 0) {
-            fprintf(stderr, "hml %s: %s/%s: %s\n", cmdname, rows[i].box,
-                    rows[i].name, err);
+            fprintf(stderr, "hml %s: %s/%s: %s\n", cmdname, rows[i].box, rows[i].name, err);
             continue;
         }
         /* the row follows the rename: the same name mdsetflags built */
         flagletters(nf, fl);
-        snprintf(name, sizeof name, "%.*s:2,%s",
-                 (int)(strstr(rows[i].name, ":2,")
-                           ? strstr(rows[i].name, ":2,") - rows[i].name
-                           : (long)strlen(rows[i].name)),
+        snprintf(name, sizeof name, "%.*s:2,%s", (int)(strstr(rows[i].name, ":2,") ? strstr(rows[i].name, ":2,") - rows[i].name : (long)strlen(rows[i].name)),
                  rows[i].name, fl);
         bindtext(d->mvfile, 1, (nf & FSeen) ? "cur" : rows[i].sub);
         bindtext(d->mvfile, 2, name);
@@ -760,9 +732,7 @@ static void fillrcpt(Db *d) {
                  " (SELECT msg FROM tag WHERE name='sent') GROUP BY msg.id");
     set = prep(d, "UPDATE msg SET rcpt=? WHERE id=?");
     while (sqlite3_step(st) == SQLITE_ROW) {
-        if (!filepath((const char *)sqlite3_column_text(st, 1),
-                      (const char *)sqlite3_column_text(st, 2),
-                      (const char *)sqlite3_column_text(st, 3), path,
+        if (!filepath((const char *)sqlite3_column_text(st, 1), (const char *)sqlite3_column_text(st, 2), (const char *)sqlite3_column_text(st, 3), path,
                       sizeof path) ||
             readfile(path, &buf, &len) < 0)
             continue;
@@ -830,10 +800,8 @@ static void applyrules(Db *d) {
 
     for (i = 0; i < ntagrules; i++) {
         ops = NULL;
-        if (parseops(tagrules[i].tags, &ops) < 0 ||
-            querycompile(tagrules[i].query, &q, &err) < 0) {
-            fprintf(stderr, "hml new: tag rule %d: %s\n", i,
-                    err ? err : "bad tag list");
+        if (parseops(tagrules[i].tags, &ops) < 0 || querycompile(tagrules[i].query, &q, &err) < 0) {
+            fprintf(stderr, "hml new: tag rule %d: %s\n", i, err ? err : "bad tag list");
             free(err);
             err = NULL;
             freeops(ops);
@@ -984,8 +952,7 @@ static void addfile(Db *d, const Job *j, const Mail *m) {
     d->added++;
 }
 
-static void dropfile(Db *d, const char *box, const char *base,
-                     sqlite3_int64 id) {
+static void dropfile(Db *d, const char *box, const char *base, sqlite3_int64 id) {
     bindtext(d->delfile, 1, box);
     bindtext(d->delfile, 2, base);
     step1(d, d->delfile);
@@ -1039,8 +1006,7 @@ static int listdir(const char *path, char ***names) {
 
 /* diff one maildir against the index: moves and removals are applied on
  * the spot, new files become jobs for the parsers */
-static void scanbox(Db *d, Scan *sc, const char *box, const char *boxdir,
-                    int force) {
+static void scanbox(Db *d, Scan *sc, const char *box, const char *boxdir, int force) {
     static const char *subs[] = {"cur", "new"};
     char path[4160], dirkey[256];
     struct stat st;
@@ -1226,9 +1192,7 @@ static void index_(Db *d, Scan *sc) {
             addfile(d, &sc->jobs[r.job], &r.m);
             mailfree(&r.m);
         } else
-            fprintf(stderr, "hml new: cannot read %s/%s/%s\n",
-                    sc->jobs[r.job].box, sc->jobs[r.job].sub,
-                    sc->jobs[r.job].name);
+            fprintf(stderr, "hml new: cannot read %s/%s/%s\n", sc->jobs[r.job].box, sc->jobs[r.job].sub, sc->jobs[r.job].name);
         done++;
         if (done % 2000 == 0) {
             exec(d, "COMMIT");
@@ -1243,8 +1207,7 @@ static void index_(Db *d, Scan *sc) {
         pthread_join(tid[i], NULL);
 }
 
-static void scanlocal(Db *d, Scan *sc, const char *root, const char *rel,
-                      int depth, int force) {
+static void scanlocal(Db *d, Scan *sc, const char *root, const char *rel, int depth, int force) {
     char dir[4200], sub[4200], cur[4300], box[512], **names = NULL;
     struct stat st;
     ptrdiff_t i;
@@ -1256,8 +1219,7 @@ static void scanlocal(Db *d, Scan *sc, const char *root, const char *rel,
         return;
     }
     for (i = 0; i < arrlen(names); i++) {
-        if (strcmp(names[i], "cur") && strcmp(names[i], "new") &&
-            strcmp(names[i], "tmp")) {
+        if (strcmp(names[i], "cur") && strcmp(names[i], "new") && strcmp(names[i], "tmp")) {
             snprintf(sub, sizeof sub, "%s%s%s", rel, *rel ? "/" : "", names[i]);
             snprintf(cur, sizeof cur, "%s/%s/cur", root, sub);
             if (stat(cur, &st) == 0 && S_ISDIR(st.st_mode)) {
@@ -1349,10 +1311,8 @@ int newmain(int argc, char **argv) {
     for (i = 0; i < naccounts; i++) {
         expand(accounts[i].maildir, root, sizeof root);
         for (k = 0; k < accounts[i].nchannels; k++) {
-            snprintf(box, sizeof box, "%s/%s", accounts[i].name,
-                     accounts[i].channels[k].near);
-            snprintf(boxdir, sizeof boxdir, "%s/%s", root,
-                     accounts[i].channels[k].near);
+            snprintf(box, sizeof box, "%s/%s", accounts[i].name, accounts[i].channels[k].near);
+            snprintf(boxdir, sizeof boxdir, "%s/%s", root, accounts[i].channels[k].near);
             scanbox(&d, &sc, strdup(box), strdup(boxdir), force);
         }
     }
@@ -1384,9 +1344,7 @@ int newmain(int argc, char **argv) {
     if (d.added || d.moved || d.removed)
         printf("hml new: %ld files added (%ld new messages), %ld moved, "
                "%ld removed in %.1fs\n",
-               d.added, d.newmsgs, d.moved, d.removed,
-               (double)(t1.tv_sec - t0.tv_sec) +
-                   (double)(t1.tv_nsec - t0.tv_nsec) / 1e9);
+               d.added, d.newmsgs, d.moved, d.removed, (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9);
     sqlite3_close_v2(d.db);
     return 0;
 }
@@ -1459,8 +1417,7 @@ int tagmain(int argc, char **argv) {
      * now; drop them so they can never shadow the real maildir state */
     exec(&d, "DELETE FROM utag WHERE name IN "
              "('unread','flagged','replied','passed')");
-    if (!(st = queryprep(d.db, "SELECT id,mid FROM msg WHERE %s", &q, "",
-                         &err))) {
+    if (!(st = queryprep(d.db, "SELECT id,mid FROM msg WHERE %s", &q, "", &err))) {
         fprintf(stderr, "hml tag: %s\n", err);
         return 2;
     }
@@ -1481,8 +1438,7 @@ int tagmain(int argc, char **argv) {
     sqlite3_finalize(st);
     if (arrlen(log)) {
         if ((size = taglogappend(log, arrlenu(log))) < 0) {
-            fprintf(stderr, "hml tag: cannot write tag log: %s\n",
-                    strerror(errno));
+            fprintf(stderr, "hml tag: cannot write tag log: %s\n", strerror(errno));
             exec(&d, "ROLLBACK");
             return 2;
         }

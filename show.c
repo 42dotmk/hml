@@ -80,10 +80,7 @@ static Hit *hits(sqlite3 *db, const Query *c, int newest, char **err) {
                          "SELECT msg.id,msg.mid,msg.date,file.box,file.sub,"
                          "file.name FROM msg JOIN file ON file.msg=msg.id"
                          " WHERE (%s)",
-                         c,
-                         newest ? " ORDER BY msg.date DESC,msg.id DESC"
-                                : " ORDER BY msg.date,msg.id",
-                         err)))
+                         c, newest ? " ORDER BY msg.date DESC,msg.id DESC" : " ORDER BY msg.date,msg.id", err)))
         return NULL;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         sqlite3_int64 id = sqlite3_column_int64(st, 0);
@@ -91,9 +88,7 @@ static Hit *hits(sqlite3 *db, const Query *c, int newest, char **err) {
         Hit h;
         if (arrlen(out) && arrlast(out).id == id)
             continue; /* another file of the same message */
-        if (!filepath(box, (const char *)sqlite3_column_text(st, 4),
-                      (const char *)sqlite3_column_text(st, 5), path,
-                      sizeof path))
+        if (!filepath(box, (const char *)sqlite3_column_text(st, 4), (const char *)sqlite3_column_text(st, 5), path, sizeof path))
             continue;
         h.id = id;
         h.mid = strdup((const char *)sqlite3_column_text(st, 1));
@@ -169,12 +164,10 @@ static void multipart(Walk *w, const char *s, size_t n, const char *b) {
     while (pos < n) {
         nl = memchr(s + pos, '\n', n - pos);
         end = nl ? (size_t)(nl - s) + 1 : n;
-        if (end - pos >= bl + 2 && s[pos] == '-' && s[pos + 1] == '-' &&
-            !memcmp(s + pos + 2, b, bl)) {
+        if (end - pos >= bl + 2 && s[pos] == '-' && s[pos + 1] == '-' && !memcmp(s + pos + 2, b, bl)) {
             if (in)
                 walk(w, s + start, pos > start ? pos - start : 0);
-            if (end - pos >= bl + 4 && s[pos + bl + 2] == '-' &&
-                s[pos + bl + 3] == '-')
+            if (end - pos >= bl + 4 && s[pos + bl + 2] == '-' && s[pos + bl + 3] == '-')
                 return;
             in = 1;
             start = end;
@@ -215,8 +208,7 @@ static void showheaders(Hdr *h, long date, const char *tags) {
 
 /* decoded text of a text part body, UTF-8 */
 static char *textof(const char *ct, const char *cte, const char *s, size_t n) {
-    char *dec = mimecte(cte, s, n), *cs = ct ? mimeparam(ct, "charset") : NULL,
-         *u = NULL;
+    char *dec = mimecte(cte, s, n), *cs = ct ? mimeparam(ct, "charset") : NULL, *u = NULL;
 
     mimeutf8(&u, cs, dec, arrlenu(dec));
     arrfree(dec);
@@ -229,9 +221,7 @@ static char *textof(const char *ct, const char *cte, const char *s, size_t n) {
 static void walk(Walk *w, const char *s, size_t n) {
     Hdr *h = NULL;
     size_t bo = mimehdrs(s, n, &h);
-    char *ct = mimehget(h, "Content-Type"),
-         *cte = mimehget(h, "Content-Transfer-Encoding"),
-         *cd = mimehget(h, "Content-Disposition"), *fn = NULL, *b, *u, *cid,
+    char *ct = mimehget(h, "Content-Type"), *cte = mimehget(h, "Content-Transfer-Encoding"), *cd = mimehget(h, "Content-Disposition"), *fn = NULL, *b, *u, *cid,
          type[128] = "text/plain";
     int id = w->next++, ismulti, isrfc, istext, isatt;
 
@@ -248,11 +238,8 @@ static void walk(Walk *w, const char *s, size_t n) {
      * a Content-ID image the HTML references (the same rule the index
      * uses for the attachment tag) */
     cid = mimehget(h, "Content-ID");
-    isatt = !(!strcmp(type, "application/pkcs7-signature") ||
-              !strcmp(type, "application/x-pkcs7-signature") ||
-              !strcmp(type, "application/pgp-signature")) &&
-            ((cd && !strncasecmp(cd, "attachment", 10)) ||
-             (fn && !cid && !ismulti && !isrfc && !istext));
+    isatt = !(!strcmp(type, "application/pkcs7-signature") || !strcmp(type, "application/x-pkcs7-signature") || !strcmp(type, "application/pgp-signature")) &&
+            ((cd && !strncasecmp(cd, "attachment", 10)) || (fn && !cid && !ismulti && !isrfc && !istext));
     free(cid);
 
     if (w->mode == WRaw) {
@@ -265,8 +252,7 @@ static void walk(Walk *w, const char *s, size_t n) {
                 fwrite(dec, 1, arrlenu(dec), stdout);
                 arrfree(dec);
             }
-        } else if (ismulti && w->depth < DepthMax && ct &&
-                   (b = mimeparam(ct, "boundary"))) {
+        } else if (ismulti && w->depth < DepthMax && ct && (b = mimeparam(ct, "boundary"))) {
             w->depth++;
             multipart(w, s + bo, n - bo, b);
             w->depth--;
@@ -279,8 +265,7 @@ static void walk(Walk *w, const char *s, size_t n) {
             arrfree(dec);
         }
     } else if (w->mode == WText) {
-        if (ismulti && w->depth < DepthMax && ct &&
-            (b = mimeparam(ct, "boundary"))) {
+        if (ismulti && w->depth < DepthMax && ct && (b = mimeparam(ct, "boundary"))) {
             w->depth++;
             multipart(w, s + bo, n - bo, b);
             w->depth--;
@@ -301,8 +286,7 @@ static void walk(Walk *w, const char *s, size_t n) {
         }
     } else if (isatt) {
         char *dn = mimedecode(fn ? fn : "");
-        printf("\fattachment{ ID: %d, Filename: %s, Content-type: %s\n", id, dn,
-               type);
+        printf("\fattachment{ ID: %d, Filename: %s, Content-type: %s\n", id, dn, type);
         printf("Non-text part: %s\n", type);
         puts("\fattachment}");
         free(dn);
@@ -358,8 +342,7 @@ static char *msgtags(sqlite3 *db, sqlite3_int64 id) {
     sqlite3_stmt *st;
     char *out = NULL;
 
-    sqlite3_prepare_v2(db, "SELECT name FROM tag WHERE msg=? ORDER BY name", -1,
-                       &st, NULL);
+    sqlite3_prepare_v2(db, "SELECT name FROM tag WHERE msg=? ORDER BY name", -1, &st, NULL);
     sqlite3_bind_int64(st, 1, id);
     while (sqlite3_step(st) == SQLITE_ROW) {
         if (out)
@@ -427,8 +410,7 @@ static char *sopts(int argc, char **argv, SOpts *o, const char *cmd) {
             o->part = atoi(a + 7);
         else if (!strcmp(a, "--include-html"))
             o->html = 1;
-        else if (!strcmp(a, "--entire-thread") ||
-                 !strncmp(a, "--entire-thread=", 16))
+        else if (!strcmp(a, "--entire-thread") || !strncmp(a, "--entire-thread=", 16))
             o->entire = 1;
         else if (!strncmp(a, "--reply-to=", 11))
             o->replyto = a + 11;
@@ -527,8 +509,7 @@ int showmain(int argc, char **argv) {
             Hdr *h = NULL;
             char *tags = msgtags(db, hs[i].id);
             mimehdrs(buf, n, &h);
-            printf("\fmessage{ id:%s depth:0 match:1 excluded:0 filename:%s\n",
-                   hs[i].mid, hs[i].path);
+            printf("\fmessage{ id:%s depth:0 match:1 excluded:0 filename:%s\n", hs[i].mid, hs[i].path);
             showheaders(h, hs[i].date, tags);
             puts("\fbody{");
             walk(&w, buf, n);
@@ -611,8 +592,7 @@ int replymain(int argc, char **argv) {
     Hit *hs;
     Hdr *h = NULL;
     Walk w = {WText, 0, 0, 0, 1, 0, NULL, NULL};
-    char *q, *err = NULL, dberr[256], *buf, *v, *from, *subject, *date, *mid,
-             *me = NULL, **to = NULL, **cc = NULL, **orig, **l, *text;
+    char *q, *err = NULL, dberr[256], *buf, *v, *from, *subject, *date, *mid, *me = NULL, **to = NULL, **cc = NULL, **orig, **l, *text;
     const char *acct = NULL, *p;
     size_t n;
     ptrdiff_t i;
@@ -621,8 +601,7 @@ int replymain(int argc, char **argv) {
     if (!(q = sopts(argc, argv, &o, "reply")))
         return 2;
     if (!*q) {
-        fputs("usage: hml reply [--reply-to=sender|all] [--] <query>\n",
-              stderr);
+        fputs("usage: hml reply [--reply-to=sender|all] [--] <query>\n", stderr);
         arrfree(q);
         return 2;
     }
@@ -653,8 +632,7 @@ int replymain(int argc, char **argv) {
 
     /* the account the message lives in is the one replying */
     for (k = 0; k < naccounts; k++)
-        if (!strncmp(hs[0].box, accounts[k].name, strlen(accounts[k].name)) &&
-            hs[0].box[strlen(accounts[k].name)] == '/')
+        if (!strncmp(hs[0].box, accounts[k].name, strlen(accounts[k].name)) && hs[0].box[strlen(accounts[k].name)] == '/')
             acct = accounts[k].user;
     if (!acct && naccounts)
         acct = accounts[0].user;
@@ -713,8 +691,7 @@ int replymain(int argc, char **argv) {
         v = mimehget(h, "In-Reply-To");
     }
     if ((v && *v) || (mid && *mid))
-        printf("References: %s%s%s\n", v && *v ? v : "",
-               v && *v && mid && *mid ? " " : "", mid && *mid ? mid : "");
+        printf("References: %s%s%s\n", v && *v ? v : "", v && *v && mid && *mid ? " " : "", mid && *mid ? mid : "");
     free(v);
     putchar('\n');
 
